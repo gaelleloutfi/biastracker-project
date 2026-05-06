@@ -1,0 +1,31 @@
+[workspace]
+name = "protperties"
+version = "0.1.0"
+authors = ["Gaelle Loutfi <gaelle.loutfi@gmail.com>"]
+channels = ["conda-forge"]
+platforms = ["linux-64", "win-64", "osx-64", "osx-arm64"]
+
+[dependencies]
+pandas = ">=2.3.3,<3"
+pip = ">=25.3,<26"
+biopython = ">=1.86,<2"
+pyteomics = ">=4.7.5,<5"
+pytest = ">=9.0.0,<10"
+typer = ">=0.20.0,<0.21"
+numpy = ">=2.3.4,<3"
+scipy = ">=1.16.3,<2"
+matplotlib = ">=3.10.7,<4"
+seaborn = ">=0.13.2,<0.14"
+pyarrow = ">=22.0.0,<23"
+requests = ">=2.32.5,<3"
+openpyxl = ">=3.1.5,<4"
+
+[tasks]
+dev = "pip install -e ."
+lint = "ruff check src tests && black --check src tests"
+fmt = "black src tests"
+test = "pytest -q --maxfail=1 --disable-warnings"
+cov = "pytest --cov=protperties --cov-report=term-missing"
+annotateA = "protperties annotate examples/A.fasta --out out/A.csv"
+compareAB = "protperties compare --a examples/A.fasta --b examples/B.fasta --out out"
+

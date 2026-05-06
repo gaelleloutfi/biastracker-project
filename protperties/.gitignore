@@ -1,0 +1,18 @@
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+# Python
+__pycache__/
+*.pyc
+
+# Packaging 
+*.egg-info/
+dist/
+build/
+
+# VSCode
+.vscode/
+
+# PyTest cache
+.pytest_cache/
