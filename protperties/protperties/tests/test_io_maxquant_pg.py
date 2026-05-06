@@ -74,13 +74,27 @@ def test_from_maxquant_proteingroups_on_test_data():
     if not path.exists():
         pytest.skip(f"{path} not found")
         
+    raw_df = pd.read_csv(path, sep="\t", low_memory=False)
     out = from_maxquant_proteingroups(path, drop_zeros=True, statistic="median", fetch_sequences=False)
     
-    assert len(out) >= 0
+    assert len(out) > 0, "Loader returned empty dataframe"
     assert "primary_id" in out.columns
     assert "expression" in out.columns
     assert "n_samples_used" in out.columns
     assert "lfq_statistic" in out.columns
+    
+    if "Reverse" in out.columns:
+        assert not (out["Reverse"] == "+").any()
+    if "Potential contaminant" in out.columns:
+        assert not (out["Potential contaminant"] == "+").any()
+    if "Only identified by site" in out.columns:
+        assert not (out["Only identified by site"].astype(str).str.strip() == "+").any()
+    
+    lfq_cols = [c for c in raw_df.columns if c.startswith("LFQ intensity ")]
+    assert len(lfq_cols) > 0
+    
+    assert (out["n_samples_used"] >= 0).all()
+    assert (out["n_samples_used"] <= len(lfq_cols)).all()
     
     if "has_sequence" in out.columns:
         assert not out["has_sequence"].any()

@@ -1,5 +1,0 @@
-Protein IDs	LFQ intensity 1	LFQ intensity 2	Reverse	Potential contaminant	Only identified by site
-sp|P12345|NAME;tr|Q9XXX1|NAME	0.0	2000.0			
-sp|P67890|NAME	1000.0	1000.0			
-sp|Q11111|NAME	500.0	0.0	+		
-sp|R22222|NAME	2000.0	2000.0		+	
