@@ -1,9 +1,21 @@
 primary_id,term_id,term_name,source,category
-P00001,GO:0000001,mitochondrion,PANTHER_GO_SLIM,Cellular Component
-P00002,GO:0000001,mitochondrion,PANTHER_GO_SLIM,Cellular Component
-P00003,GO:0000001,mitochondrion,PANTHER_GO_SLIM,Cellular Component
-P00004,GO:0000001,mitochondrion,PANTHER_GO_SLIM,Cellular Component
-P00005,GO:0000002,nucleus,PANTHER_GO_SLIM,Cellular Component
-P00006,GO:0000002,nucleus,PANTHER_GO_SLIM,Cellular Component
-P00007,GO:0000002,nucleus,PANTHER_GO_SLIM,Cellular Component
-P00008,GO:0000002,nucleus,PANTHER_GO_SLIM,Cellular Component
+PROT01,GO:0005739,mitochondria,GO,subcellular
+PROT02,GO:0005739,mitochondria,GO,subcellular
+PROT03,GO:0005739,mitochondria,GO,subcellular
+PROT04,GO:0005739,mitochondria,GO,subcellular
+PROT05,GO:0005739,mitochondria,GO,subcellular
+PROT06,GO:0005886,membrane,GO,subcellular
+PROT07,GO:0005886,membrane,GO,subcellular
+PROT08,GO:0005886,membrane,GO,subcellular
+PROT09,GO:0005886,membrane,GO,subcellular
+PROT10,GO:0005886,membrane,GO,subcellular
+GHOST01,GO:0005634,nucleus,GO,subcellular
+GHOST02,GO:0005634,nucleus,GO,subcellular
+GHOST03,GO:0005634,nucleus,GO,subcellular
+GHOST04,GO:0005634,nucleus,GO,subcellular
+GHOST05,GO:0005634,nucleus,GO,subcellular
+GHOST06,GO:0005840,ribosome,GO,subcellular
+GHOST07,GO:0005840,ribosome,GO,subcellular
+GHOST08,GO:0005840,ribosome,GO,subcellular
+GHOST09,GO:0005840,ribosome,GO,subcellular
+GHOST10,GO:0005840,ribosome,GO,subcellular

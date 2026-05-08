@@ -17,3 +17,15 @@ python -m pip install -e .
 
 ## First planned workflow
 The first planned workflow is to load a proteomics dataset through `protperties`, then use BiasTracker to run a comprehensive statistical summary and identify potential distribution biases in protein expression across different experimental conditions.
+
+## Quickstart with toy data
+
+To verify the installation works end-to-end without needing real data or an internet connection, run the toy workflow:
+
+```bash
+biastracker run examples/ghost_proteome_config.yaml
+```
+
+**Expected outputs:**
+- `examples/results/tables/` (Contains CSV reports)
+- `examples/results/figures/` (Contains PNG plots)
