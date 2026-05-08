@@ -116,19 +116,22 @@ def enrich(
 def run(
     config: str = typer.Argument(..., help="Path to config YAML file")
 ):
-    """Recognizes a YAML config file for full workflow execution."""
+    from biastracker.config import load_config, validate_minimal_config
+    from biastracker.workflow import run_workflow
+    
     try:
-        with open(config, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f)
+        config_data = load_config(config)
+        validate_minimal_config(config_data)
     except Exception as e:
-        typer.echo(f"Failed to load config: {e}", err=True)
+        typer.echo(f"Error loading or validating config: {e}", err=True)
         raise typer.Exit(1)
         
-    if not isinstance(data, dict) or "datasets" not in data or "analyses" not in data:
-        typer.echo("Error: Config must contain 'datasets' and 'analyses'", err=True)
+    try:
+        run_workflow(config_data, config_path=config)
+        typer.echo(f"Workflow completed successfully.")
+    except Exception as e:
+        typer.echo(f"Workflow failed: {e}", err=True)
         raise typer.Exit(1)
-        
-    typer.echo("config-driven execution is recognized but not fully implemented yet")
 
 if __name__ == "__main__":
     app()

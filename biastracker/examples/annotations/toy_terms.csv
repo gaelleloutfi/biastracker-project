@@ -1,0 +1,9 @@
+primary_id,term_id,term_name,source,category
+P00001,GO:0000001,mitochondrion,PANTHER_GO_SLIM,Cellular Component
+P00002,GO:0000001,mitochondrion,PANTHER_GO_SLIM,Cellular Component
+P00003,GO:0000001,mitochondrion,PANTHER_GO_SLIM,Cellular Component
+P00004,GO:0000001,mitochondrion,PANTHER_GO_SLIM,Cellular Component
+P00005,GO:0000002,nucleus,PANTHER_GO_SLIM,Cellular Component
+P00006,GO:0000002,nucleus,PANTHER_GO_SLIM,Cellular Component
+P00007,GO:0000002,nucleus,PANTHER_GO_SLIM,Cellular Component
+P00008,GO:0000002,nucleus,PANTHER_GO_SLIM,Cellular Component

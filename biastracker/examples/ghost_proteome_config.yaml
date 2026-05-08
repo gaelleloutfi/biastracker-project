@@ -1,0 +1,41 @@
+project_name: ghost_proteome_bias
+
+datasets:
+  - name: human_pe_status
+    type: standard_csv
+    path: data/toy_proteins.csv
+    level: protein
+    group_col: PE_group
+
+annotations:
+  - name: panther_go_slim
+    type: long
+    path: annotations/toy_terms.csv
+    source: PANTHER_GO_SLIM
+
+analysis:
+  summary: true
+
+  comparisons:
+    - dataset: human_pe_status
+      group_col: PE_group
+      group_a: PE1
+      group_b: ghost
+      features:
+        - length
+        - mw
+        - pi
+        - gravy
+        - aliphatic_index
+        - trypsin_sites
+        - expression
+
+  enrichment:
+    - dataset: human_pe_status
+      annotation: panther_go_slim
+      group_col: PE_group
+      query_group: ghost
+      min_term_size: 1
+
+output:
+  directory: results/ghost_proteome_bias

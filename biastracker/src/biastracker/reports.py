@@ -52,7 +52,8 @@ def save_table(df: pd.DataFrame, output_dir: Union[str, Path], filename: str) ->
 def save_dataset_summary(
     dataset: BiasDataset, 
     output_dir: Union[str, Path], 
-    features: Optional[list[str]] = None
+    features: Optional[list[str]] = None,
+    filename: str = "dataset_summary.csv"
 ) -> Path:
     """
     Runs summarize_dataset and saves the dataset summary table.
@@ -61,12 +62,13 @@ def save_dataset_summary(
         dataset: The BiasDataset to summarize.
         output_dir: The root output directory.
         features: Optional list of features to summarize.
+        filename: The filename to save as. Defaults to "dataset_summary.csv".
         
     Returns:
         The path to the saved summary CSV file.
     """
     summary_df = summarize_dataset(dataset, features=features)
-    return save_table(summary_df, output_dir, "dataset_summary.csv")
+    return save_table(summary_df, output_dir, filename)
 
 def save_group_comparison_results(
     results_df: pd.DataFrame, 
