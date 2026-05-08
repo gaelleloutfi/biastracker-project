@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 from statsmodels.stats.multitest import multipletests
-from typing import Dict, Any, Union
+from typing import Dict, Any
 
 def mannwhitney_u(x, y) -> Dict[str, Any]:
     x_valid = np.asarray(x, dtype=float)

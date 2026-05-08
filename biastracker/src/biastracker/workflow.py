@@ -6,8 +6,6 @@ from biastracker.dataset import load_standard_table
 from biastracker.annotations.custom import load_long_annotation_table
 from biastracker.reports import (
     save_dataset_summary,
-    save_group_comparison_results,
-    save_enrichment_results,
     prepare_output_dirs,
 )
 from biastracker.analysis.compare import compare_groups

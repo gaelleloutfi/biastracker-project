@@ -1,5 +1,4 @@
 import pytest
-from pathlib import Path
 import yaml
 from biastracker.config import load_config, validate_minimal_config
 

@@ -1,7 +1,5 @@
 import typer
-import yaml
 from typing import Optional
-from pathlib import Path
 
 from biastracker import __version__
 from biastracker.dataset import check_protperties_available, load_standard_table
@@ -128,7 +126,7 @@ def run(
         
     try:
         run_workflow(config_data, config_path=config)
-        typer.echo(f"Workflow completed successfully.")
+        typer.echo("Workflow completed successfully.")
     except Exception as e:
         typer.echo(f"Workflow failed: {e}", err=True)
         raise typer.Exit(1)

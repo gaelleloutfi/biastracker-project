@@ -47,7 +47,7 @@ def plot_violin(
             plt.close(fig)
             raise ValueError("No valid data available to plot after dropping NaNs.")
 
-        parts = ax.violinplot(valid_data, showmeans=False, showmedians=True)
+        ax.violinplot(valid_data, showmeans=False, showmedians=True)
         ax.set_xticks(range(1, len(valid_groups) + 1))
         ax.set_xticklabels(valid_groups)
         ax.set_xlabel(group_col)
@@ -56,7 +56,7 @@ def plot_violin(
         if len(data) == 0:
             plt.close(fig)
             raise ValueError("No valid data available to plot after dropping NaNs.")
-        parts = ax.violinplot([data], showmeans=False, showmedians=True)
+        ax.violinplot([data], showmeans=False, showmedians=True)
         ax.set_xticks([1])
         ax.set_xticklabels([dataset.name])
         
@@ -137,7 +137,7 @@ def plot_enrichment_dotplot(
         
     metric = "fdr" if "fdr" in enrichment_df.columns else "p_value"
     if metric not in enrichment_df.columns:
-        raise ValueError(f"Neither 'fdr' nor 'p_value' found in columns")
+        raise ValueError("Neither 'fdr' nor 'p_value' found in columns")
     if "term_name" not in enrichment_df.columns:
         raise ValueError("'term_name' column not found")
         

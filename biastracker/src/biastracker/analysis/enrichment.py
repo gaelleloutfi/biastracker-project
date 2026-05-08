@@ -9,7 +9,7 @@ The main entry-points are:
 """
 from __future__ import annotations
 
-from typing import Literal, Optional, Set
+from typing import Literal, Set
 
 import numpy as np
 import pandas as pd

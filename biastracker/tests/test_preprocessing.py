@@ -1,14 +1,12 @@
 import pandas as pd
 import numpy as np
-import pytest
 from biastracker.preprocessing import (
     select_numeric_features,
     filter_valid_ids,
     filter_valid_sequences,
     make_binary_group,
     add_group_from_mapping,
-    clip_feature_quantiles,
-    DEFAULT_FEATURES
+    clip_feature_quantiles
 )
 
 def test_select_numeric_features():

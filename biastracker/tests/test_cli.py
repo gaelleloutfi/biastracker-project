@@ -1,6 +1,3 @@
-import pytest
-import pandas as pd
-from pathlib import Path
 from typer.testing import CliRunner
 from biastracker.cli import app
 
@@ -16,9 +13,9 @@ def test_check():
     assert result.exit_code == 0
     assert "Success" in result.stdout
 
-def test_analyze(tmp_path):
+def test_analyze(tmp_path, toy_protein_df):
     input_csv = tmp_path / "input.csv"
-    pd.DataFrame({"primary_id": ["P1", "P2"], "sequence": ["", ""], "level": ["protein", "protein"], "feat1": [1.0, 2.0]}).to_csv(input_csv, index=False)
+    toy_protein_df.to_csv(input_csv, index=False)
     
     out_dir = tmp_path / "out"
     result = runner.invoke(app, [
@@ -29,15 +26,9 @@ def test_analyze(tmp_path):
     assert result.exit_code == 0
     assert (out_dir / "tables" / "dataset_summary.csv").exists()
 
-def test_compare_groups(tmp_path):
+def test_compare_groups(tmp_path, toy_protein_df):
     input_csv = tmp_path / "input.csv"
-    pd.DataFrame({
-        "primary_id": ["P1", "P2", "P3", "P4"], 
-        "sequence": ["", "", "", ""],
-        "level": ["protein", "protein", "protein", "protein"],
-        "group": ["A", "A", "B", "B"],
-        "feat1": [1.0, 1.2, 5.0, 4.8]
-    }).to_csv(input_csv, index=False)
+    toy_protein_df.to_csv(input_csv, index=False)
     
     out_dir = tmp_path / "out"
     result = runner.invoke(app, [
@@ -50,24 +41,15 @@ def test_compare_groups(tmp_path):
     ])
     assert result.exit_code == 0
     assert (out_dir / "tables" / "feature_statistics.csv").exists()
-    assert (out_dir / "figures" / "violin_feat1.png").exists()
-    assert (out_dir / "figures" / "cdf_feat1.png").exists()
+    assert (out_dir / "figures" / "violin_length.png").exists()
+    assert (out_dir / "figures" / "cdf_length.png").exists()
 
-def test_enrich(tmp_path):
+def test_enrich(tmp_path, toy_protein_df, toy_annotation_df):
     input_csv = tmp_path / "input.csv"
-    pd.DataFrame({
-        "primary_id": ["P1", "P2", "P3", "P4"], 
-        "sequence": ["", "", "", ""],
-        "level": ["protein", "protein", "protein", "protein"],
-        "group": ["A", "A", "B", "B"],
-        "feat1": [1.0, 1.2, 5.0, 4.8]
-    }).to_csv(input_csv, index=False)
+    toy_protein_df.to_csv(input_csv, index=False)
     
     ann_csv = tmp_path / "ann.csv"
-    pd.DataFrame({
-        "primary_id": ["P1", "P1", "P2", "P3"],
-        "term_name": ["T1", "T2", "T1", "T2"]
-    }).to_csv(ann_csv, index=False)
+    toy_annotation_df.to_csv(ann_csv, index=False)
     
     out_dir = tmp_path / "out"
     result = runner.invoke(app, [
@@ -82,13 +64,10 @@ def test_enrich(tmp_path):
     assert result.exit_code == 0
     assert (out_dir / "tables" / "enrichment_results.csv").exists()
 
-def test_run(tmp_path):
-    config_yaml = tmp_path / "config.yaml"
-    config_yaml.write_text("datasets: []\nanalyses: []\n")
-    
-    result = runner.invoke(app, ["run", str(config_yaml)])
+def test_run_valid_config(tmp_yaml_config):
+    result = runner.invoke(app, ["run", str(tmp_yaml_config)])
     assert result.exit_code == 0
-    assert "config-driven execution is recognized but not fully implemented yet" in result.stdout
+    assert "Workflow completed successfully" in result.stdout
 
 def test_run_invalid_config(tmp_path):
     config_yaml = tmp_path / "config.yaml"
@@ -96,7 +75,7 @@ def test_run_invalid_config(tmp_path):
     
     result = runner.invoke(app, ["run", str(config_yaml)])
     assert result.exit_code == 1
-    assert "Failed to load config" in result.stdout
+    assert "Error loading or validating config" in result.stdout
 
 def test_run_missing_keys(tmp_path):
     config_yaml = tmp_path / "config.yaml"
@@ -104,4 +83,4 @@ def test_run_missing_keys(tmp_path):
     
     result = runner.invoke(app, ["run", str(config_yaml)])
     assert result.exit_code == 1
-    assert "Error: Config must contain 'datasets' and 'analyses'" in result.stdout
+    assert "missing required field: 'project_name'" in result.stdout

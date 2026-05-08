@@ -1,5 +1,4 @@
 import pytest
-import pandas as pd
 from biastracker.annotations.panther import load_panther_annotation
 
 def test_panther_loader_inference(tmp_path):
