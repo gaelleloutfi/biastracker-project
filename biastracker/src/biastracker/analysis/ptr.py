@@ -1,7 +1,7 @@
 import pandas as pd
 from typing import Optional, List
 from biastracker.dataset import BiasDataset
-from protperties import add_ptr_annotation
+from biastracker.preprocessing import select_numeric_features
 from scipy.stats import spearmanr, pearsonr
 
 def add_ptr_to_dataset(
@@ -31,6 +31,8 @@ def add_ptr_to_dataset(
     BiasDataset
         A new BiasDataset with the annotated table.
     """
+    from protperties import add_ptr_annotation
+
     new_table = add_ptr_annotation(
         dataset.table, 
         ptr_table_path, 
@@ -49,7 +51,7 @@ def add_ptr_to_dataset(
         metadata={**dataset.metadata, "ptr_added": True}
     )
 
-def summarize_ptr(dataset: BiasDataset, group_col: Optional[str] = None) -> pd.DataFrame:
+def summarize_ptr(dataset: BiasDataset, group_col: Optional[str] = None, ptr_col: str = "PTR_AML") -> pd.DataFrame:
     """Summarizes PTR values globally or by group.
     
     Parameters
@@ -64,24 +66,25 @@ def summarize_ptr(dataset: BiasDataset, group_col: Optional[str] = None) -> pd.D
     pd.DataFrame
         A dataframe with count (n), mean, median, std, min, and max of PTR values.
     """
-    if "PTR_AML" not in dataset.table.columns:
-        raise ValueError("PTR_AML column is missing from the dataset.")
+    if ptr_col not in dataset.table.columns:
+        raise ValueError(f"{ptr_col} column is missing from the dataset.")
         
-    df = dataset.table.dropna(subset=["PTR_AML"])
+    df = dataset.table.dropna(subset=[ptr_col])
     
     if group_col is None:
-        stats = df["PTR_AML"].agg(["count", "mean", "median", "std", "min", "max"])
+        stats = df[ptr_col].agg(["count", "mean", "median", "std", "min", "max"])
         return stats.to_frame().T.rename(columns={"count": "n"})
     else:
         if group_col not in dataset.table.columns:
             raise ValueError(f"group_col '{group_col}' not found in dataset.")
-        stats = df.groupby(group_col)["PTR_AML"].agg(["count", "mean", "median", "std", "min", "max"])
+        stats = df.groupby(group_col)[ptr_col].agg(["count", "mean", "median", "std", "min", "max"])
         return stats.rename(columns={"count": "n"}).reset_index()
 
 def correlate_ptr_with_features(
     dataset: BiasDataset,
     features: Optional[List[str]] = None,
     method: str = "spearman",
+    ptr_col: str = "PTR_AML",
 ) -> pd.DataFrame:
     """Tests whether PTR correlates with numeric features.
     
@@ -99,26 +102,26 @@ def correlate_ptr_with_features(
     pd.DataFrame
         DataFrame with feature, n, correlation, and p_value.
     """
-    if "PTR_AML" not in dataset.table.columns:
-        raise ValueError("PTR_AML column is missing from the dataset.")
+    if ptr_col not in dataset.table.columns:
+        raise ValueError(f"{ptr_col} column is missing from the dataset.")
         
-    available = dataset.available_features(features)
-    if "PTR_AML" in available:
-        available.remove("PTR_AML")
+    available = select_numeric_features(dataset.table, features=features)
+    if ptr_col in available:
+        available.remove(ptr_col)
         
     results = []
     for feat in available:
-        df = dataset.table[["PTR_AML", feat]].dropna()
+        df = dataset.table[[ptr_col, feat]].dropna()
         n = len(df)
         if n < 3:
             continue
             
         if method == "spearman":
-            res = spearmanr(df["PTR_AML"], df[feat])
+            res = spearmanr(df[ptr_col], df[feat])
             corr = res.statistic
             pval = res.pvalue
         elif method == "pearson":
-            res = pearsonr(df["PTR_AML"], df[feat])
+            res = pearsonr(df[ptr_col], df[feat])
             corr = res[0]
             pval = res[1]
         else:

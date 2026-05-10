@@ -70,8 +70,8 @@ def compare_groups(
     group_a, group_b:
         Labels of the two groups to compare.
     features:
-        Numeric feature columns to test. ``None`` uses all numeric columns
-        (via :func:`~biastracker.preprocessing.select_numeric_features`).
+        Numeric feature columns to test. ``None`` uses the curated BiasTracker
+        default feature list.
     correction:
         Multiple-testing correction method forwarded to
         :func:`~biastracker.stats.adjust_pvalues`.
@@ -88,18 +88,24 @@ def compare_groups(
             f"group_col '{group_col}' not found in dataset.table. "
             f"Available columns: {list(df.columns)}"
         )
+    groups = set(df[group_col].dropna().astype(str))
+    missing_groups = [g for g in (group_a, group_b) if str(g) not in groups]
+    if missing_groups:
+        raise ValueError(
+            f"group value(s) {missing_groups} not found in group_col '{group_col}'. "
+            f"Available groups: {sorted(groups)}"
+        )
 
-    # When features=None use all numeric columns; otherwise restrict to the
-    # requested subset that is present and numeric.
-    if features is None:
-        numeric_feats = dataset.available_features()
-    else:
-        numeric_feats = select_numeric_features(df, features=features)
-    mask = df[group_col].isin([group_a, group_b])
+    numeric_feats = select_numeric_features(df, features=features)
+    group_values = df[group_col].astype(str)
+    group_a_str = str(group_a)
+    group_b_str = str(group_b)
+    mask = group_values.isin([group_a_str, group_b_str])
     sub = df[mask]
+    sub_groups = group_values[mask]
 
-    vals_a = sub[sub[group_col] == group_a]
-    vals_b = sub[sub[group_col] == group_b]
+    vals_a = sub[sub_groups == group_a_str]
+    vals_b = sub[sub_groups == group_b_str]
 
     rows = []
     for feat in numeric_feats:
@@ -123,8 +129,8 @@ def compare_groups(
         rows.append({
             "dataset": dataset.name,
             "group_col": group_col,
-            "group_a": group_a,
-            "group_b": group_b,
+            "group_a": group_a_str,
+            "group_b": group_b_str,
             "feature": feat,
             "n_a": n_a,
             "n_b": n_b,
@@ -169,7 +175,8 @@ def compare_multiple_groups(
     group_col:
         Column in ``dataset.table`` that identifies groups.
     features:
-        Numeric feature columns to test. ``None`` uses all numeric columns.
+        Numeric feature columns to test. ``None`` uses the curated BiasTracker
+        default feature list.
     correction:
         Multiple-testing correction method forwarded to
         :func:`~biastracker.stats.adjust_pvalues`.
@@ -187,18 +194,16 @@ def compare_multiple_groups(
             f"Available columns: {list(df.columns)}"
         )
 
-    if features is None:
-        numeric_feats = dataset.available_features()
-    else:
-        numeric_feats = select_numeric_features(df, features=features)
+    numeric_feats = select_numeric_features(df, features=features)
 
     # Build per-group value arrays once, reused for every feature
-    group_labels = sorted(df[group_col].dropna().unique().tolist(), key=str)
+    group_values = df[group_col].astype(str)
+    group_labels = sorted(group_values[df[group_col].notna()].unique().tolist(), key=str)
 
     rows = []
     for feat in numeric_feats:
         groups_dict = {
-            g: df.loc[df[group_col] == g, feat].dropna().values
+            g: df.loc[group_values == g, feat].dropna().values
             for g in group_labels
         }
         # Only count groups with >= 2 valid values (mirrors kruskal_test internals)
@@ -245,9 +250,9 @@ def compare_datasets(
         The two datasets to compare.  Their ``.name`` attributes are used as
         group labels and must be distinct.
     features:
-        Numeric feature columns to test.  ``None`` uses every numeric column
-        found in **both** datasets.  Columns absent from either dataset are
-        silently ignored.
+        Numeric feature columns to test.  ``None`` uses the curated BiasTracker
+        default feature list found in **both** datasets. Columns absent from
+        either dataset are silently ignored.
     correction:
         Multiple-testing correction method (passed through to
         :func:`~biastracker.stats.adjust_pvalues`).
@@ -269,18 +274,25 @@ def compare_datasets(
             f"dataset_a.name and dataset_b.name are both '{dataset_a.name}'. "
             "They must be distinct so they can be used as group labels."
         )
+    if dataset_a.level != dataset_b.level:
+        raise ValueError(
+            f"dataset_a.level '{dataset_a.level}' does not match "
+            f"dataset_b.level '{dataset_b.level}'"
+        )
 
     # --- resolve the feature intersection -----------------------------------
-    feats_a = set(dataset_a.available_features())
-    feats_b = set(dataset_b.available_features())
+    resolved_a = select_numeric_features(dataset_a.table, features=features)
+    resolved_b = select_numeric_features(dataset_b.table, features=features)
+    feats_a = set(resolved_a)
+    feats_b = set(resolved_b)
 
     if features is None:
-        shared = sorted(feats_a & feats_b)
+        shared = [f for f in resolved_a if f in feats_b]
     else:
-        shared = sorted(
+        shared = [
             f for f in features
             if f in feats_a and f in feats_b
-        )
+        ]
 
     if not shared:
         raise ValueError(
@@ -328,4 +340,3 @@ def compare_datasets(
     result["comparison_type"] = "between_datasets"
 
     return result[_DATASET_COMPARE_COLS].reset_index(drop=True)
-

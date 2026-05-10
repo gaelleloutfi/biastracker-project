@@ -1,0 +1,60 @@
+project_name: toy_api_annotations
+output:
+  directory: results_api_annotations
+
+datasets:
+  - name: toy_api_proteins
+    type: standard_csv
+    path: data/toy_proteins_for_api.csv
+    level: protein
+    group_col: bias_group
+
+annotations:
+  - name: panther_api
+    type: panther_api
+    dataset: toy_api_proteins
+    id_col: primary_id
+    organism: 9606
+    cache_dir: data/toy_panther_api_cache
+    categories:
+      - go_bp
+      - go_cc
+      - go_mf
+      - protein_class
+      - panther_pathway
+      - reactome_pathway
+
+  - name: hpa_subcellular
+    type: hpa_subcellular
+    path: data/toy_hpa_subcellular.tsv
+    map_to_uniprot: true
+    use_uniprot_api: false
+    from_ns: Ensembl
+    to_ns: UniProtKB
+    ensembl_to_uniprot:
+      ENSG00000141510:
+        - P04637
+      ENSG00000146648:
+        - P00533
+      ENSG00000134057:
+        - Q00987
+      ENSG00000105323:
+        - Q9Y6K9
+      ENSG00000012048:
+        - P38398
+      ENSG00000254647:
+        - P01308
+
+analysis:
+  summary: true
+  enrichment:
+    - dataset: toy_api_proteins
+      group_col: bias_group
+      query_group: case
+      annotation: panther_api
+      min_term_size: 1
+    - dataset: toy_api_proteins
+      group_col: bias_group
+      query_group: case
+      annotation: hpa_subcellular
+      min_term_size: 1

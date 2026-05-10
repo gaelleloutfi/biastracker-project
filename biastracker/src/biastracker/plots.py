@@ -148,19 +148,21 @@ def plot_enrichment_dotplot(
     
     fig, ax = plt.subplots(figsize=(8, max(4, len(df) * 0.4)))
     
-    x = -np.log10(df[metric].astype(float) + 1e-300)  # avoid log(0)
+    pvals = pd.to_numeric(df[metric], errors="coerce").clip(lower=0)
+    x = -np.log10(pvals + 1e-300)  # avoid log(0)
     y = df["term_name"].astype(str)
     
     if "odds_ratio" in df.columns:
-        sizes = df["odds_ratio"].astype(float) * 50
-        # handle nan / inf
-        sizes = sizes.replace([np.inf, -np.inf], np.nan).fillna(50)
-        sizes = np.clip(sizes, 20, 500)
-        scatter = ax.scatter(x, y, s=sizes, c=x, cmap="viridis", alpha=0.8)
-        cbar = fig.colorbar(scatter, ax=ax)
-        cbar.set_label(f"-log10({metric})")
+        odds = pd.to_numeric(df["odds_ratio"], errors="coerce")
+        finite_odds = odds.replace([np.inf, -np.inf], np.nan)
+        fallback = finite_odds.median()
+        if pd.isna(fallback) or fallback <= 0:
+            fallback = 1.0
+        odds = finite_odds.fillna(fallback).clip(lower=0)
+        sizes = np.clip(np.sqrt(odds) * 80, 20, 500)
+        ax.scatter(x, y, s=sizes, alpha=0.8)
     else:
-        ax.scatter(x, y, c=x, cmap="viridis", s=100, alpha=0.8)
+        ax.scatter(x, y, s=100, alpha=0.8)
         
     ax.set_xlabel(f"-log10({metric})")
     ax.set_ylabel("Term")

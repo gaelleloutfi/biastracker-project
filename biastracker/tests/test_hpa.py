@@ -1,54 +1,65 @@
 import pandas as pd
 import pytest
+
 from biastracker.annotations.hpa import load_hpa_subcellular
 
-def test_load_hpa_subcellular_inference(tmp_path):
-    df = pd.DataFrame({
-        "Uniprot": ["P12345", "Q67890"],
-        "Subcellular location": ["Nucleus", "Cytosol; Mitochondrion"]
-    })
-    path = tmp_path / "hpa.csv"
-    df.to_csv(path, index=False)
-    
-    ann = load_hpa_subcellular(path)
-    assert ann.name == "hpa_subcellular"
-    assert ann.source == "HPA"
-    
-    table = ann.table
-    assert len(table) == 3
-    
-    p1 = table[table["primary_id"] == "P12345"]
-    assert len(p1) == 1
-    assert p1.iloc[0]["term_name"] == "Nucleus"
-    assert p1.iloc[0]["term_id"] == "HPA:Nucleus"
-    assert p1.iloc[0]["category"] == "subcellular_location"
-    
-    p2 = table[table["primary_id"] == "Q67890"]
-    assert len(p2) == 2
-    assert set(p2["term_name"]) == {"Cytosol", "Mitochondrion"}
-    assert set(p2["term_id"]) == {"HPA:Cytosol", "HPA:Mitochondrion"}
 
-def test_load_hpa_subcellular_explicit(tmp_path):
-    df = pd.DataFrame({
-        "my_id": ["P1", "P2"],
-        "my_loc": ["Cytoplasm, Nucleus", "Golgi apparatus"]
-    })
+def test_load_hpa_subcellular_local_hpa_format(tmp_path):
+    df = pd.DataFrame(
+        {
+            "Gene": ["ENSG00000000003"],
+            "Gene name": ["TSPAN6"],
+            "Reliability": ["Approved"],
+            "Main location": ["Cell Junctions;Cytosol"],
+            "Additional location": ["Nucleoli fibrillar center"],
+            "GO id": [
+                "Cell Junctions (GO:0030054);Cytosol (GO:0005829);"
+                "Nucleoli fibrillar center (GO:0001650)"
+            ],
+        }
+    )
     path = tmp_path / "hpa.tsv"
     df.to_csv(path, sep="\t", index=False)
-    
-    ann = load_hpa_subcellular(path, id_col="my_id", location_col="my_loc")
-    table = ann.table
-    assert len(table) == 3
-    assert "HPA:Golgi_apparatus" in table["term_id"].values
-    assert "Golgi apparatus" in table["term_name"].values
+
+    ann = load_hpa_subcellular(path)
+
+    assert ann.name == "hpa_subcellular"
+    assert ann.source == "HPA"
+    assert set(ann.table["primary_id"]) == {"ENSG00000000003"}
+    assert set(ann.table["term_name"]) == {
+        "Cell Junctions",
+        "Cytosol",
+        "Nucleoli fibrillar center",
+    }
+    assert "GO:0030054" in set(ann.table["term_id"])
+
+
+def test_load_hpa_subcellular_maps_to_uniprot_with_provided_mapping(tmp_path):
+    df = pd.DataFrame(
+        {
+            "Gene": ["ENSG00000000003"],
+            "Gene name": ["TSPAN6"],
+            "Main location": ["Cytosol"],
+            "GO id": ["Cytosol (GO:0005829)"],
+        }
+    )
+    path = tmp_path / "hpa.tsv"
+    df.to_csv(path, sep="\t", index=False)
+
+    ann = load_hpa_subcellular(
+        path,
+        map_to_uniprot=True,
+        ensembl_to_uniprot={"ENSG00000000003": ["P12345"]},
+    )
+
+    assert set(ann.table["primary_id"]) == {"P12345"}
+    assert ann.metadata["id_namespace"] == "UniProtKB"
+
 
 def test_load_hpa_subcellular_missing_cols(tmp_path):
-    df = pd.DataFrame({
-        "foo": ["A", "B"],
-        "bar": ["C", "D"]
-    })
-    path = tmp_path / "hpa.csv"
-    df.to_csv(path, index=False)
-    
-    with pytest.raises(ValueError, match="Could not infer or find required columns"):
+    df = pd.DataFrame({"foo": ["A"], "bar": ["B"]})
+    path = tmp_path / "hpa.tsv"
+    df.to_csv(path, sep="\t", index=False)
+
+    with pytest.raises(ValueError, match="missing columns"):
         load_hpa_subcellular(path)

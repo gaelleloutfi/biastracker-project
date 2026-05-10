@@ -42,7 +42,7 @@ def test_ptr_summary_and_correlation(tmp_path):
         "sequence": ["A", "B", "C", "D"],
         "level": ["protein"] * 4,
         "PTR_AML": [10.5, 20.0, 30.5, 40.0],
-        "feature_1": [1.0, 2.0, 3.0, 4.0],
+        "length": [1.0, 2.0, 3.0, 4.0],
         "group": ["A", "A", "B", "B"]
     })
     
@@ -63,7 +63,7 @@ def test_ptr_summary_and_correlation(tmp_path):
     # Correlation
     corr_df = correlate_ptr_with_features(ds)
     assert len(corr_df) == 1
-    assert corr_df.iloc[0]["feature"] == "feature_1"
+    assert corr_df.iloc[0]["feature"] == "length"
     assert corr_df.iloc[0]["n"] == 4
     assert corr_df.iloc[0]["correlation"] > 0.99
     
@@ -80,3 +80,19 @@ def test_ptr_missing_error():
         
     with pytest.raises(ValueError, match="PTR_AML column is missing"):
         correlate_ptr_with_features(ds)
+
+def test_ptr_custom_column():
+    df = pd.DataFrame({
+        "primary_id": ["P1", "P2", "P3", "P4"],
+        "sequence": ["A", "B", "C", "D"],
+        "level": ["protein"] * 4,
+        "PTR_CUSTOM": [10.0, 20.0, 30.0, 40.0],
+        "length": [1.0, 2.0, 3.0, 4.0],
+    })
+    ds = BiasDataset(name="test", table=df, level="protein")
+
+    summ = summarize_ptr(ds, ptr_col="PTR_CUSTOM")
+    corr = correlate_ptr_with_features(ds, ptr_col="PTR_CUSTOM")
+
+    assert summ.iloc[0]["n"] == 4
+    assert corr.iloc[0]["feature"] == "length"

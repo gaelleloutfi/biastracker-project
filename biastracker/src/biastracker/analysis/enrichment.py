@@ -77,9 +77,14 @@ def run_ora(
     pd.DataFrame
         One row per tested term with columns defined in ``_ORA_COLS``.
     """
-    # Restrict query to background universe
-    query_ids = set(str(q) for q in query_ids) & set(str(b) for b in background_ids)
     background_ids = set(str(b) for b in background_ids)
+    if not background_ids:
+        raise ValueError("background_ids is empty; ORA requires a non-empty background universe")
+
+    # Restrict query to background universe
+    query_ids = set(str(q) for q in query_ids) & background_ids
+    if not query_ids:
+        raise ValueError("query_ids is empty after intersecting with background_ids")
 
     n_query = len(query_ids)
     n_background = len(background_ids)
@@ -205,6 +210,8 @@ def run_group_ora(
         If *id_col* is not found in ``dataset.table``.
     """
     df = dataset.table
+    if background not in {"all", "other"}:
+        raise ValueError("background must be 'all' or 'other'")
 
     if group_col not in df.columns:
         raise ValueError(
@@ -216,16 +223,24 @@ def run_group_ora(
             f"id_col '{id_col}' not found in dataset.table. "
             f"Available columns: {list(df.columns)}"
         )
+    groups = set(df[group_col].dropna().astype(str))
+    if str(query_group) not in groups:
+        raise ValueError(
+            f"query_group '{query_group}' not found in group_col '{group_col}'. "
+            f"Available groups: {sorted(groups)}"
+        )
+    group_values = df[group_col].astype(str)
+    query_group_str = str(query_group)
 
     query_ids = set(
-        df.loc[df[group_col] == query_group, id_col]
+        df.loc[group_values == query_group_str, id_col]
         .dropna()
         .astype(str)
     )
 
     if background == "other":
         background_ids = set(
-            df.loc[df[group_col] != query_group, id_col]
+            df.loc[group_values != query_group_str, id_col]
             .dropna()
             .astype(str)
         )

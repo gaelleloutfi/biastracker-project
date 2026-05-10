@@ -18,6 +18,8 @@ def make_dataset(name="test_ds"):
         "group":      ["A", "A", "A", "A", "B", "B", "B", "B"],
         "score":      [1.0, 2.0, 3.0, 4.0, 10.0, 11.0, 12.0, 13.0],
         "weight":     [5.0, 6.0, 7.0, 8.0, 50.0, 60.0, 70.0, 80.0],
+        "length":     [10.0, 20.0, 30.0, 40.0, 100.0, 110.0, 120.0, 130.0],
+        "mw":         [100.0, 200.0, 300.0, 400.0, 1000.0, 1100.0, 1200.0, 1300.0],
     })
     return BiasDataset(name=name, table=df, level="protein")
 
@@ -92,8 +94,8 @@ class TestCompareGroups:
     def test_multiple_features(self):
         ds = make_dataset()
         result = compare_groups(ds, group_col="group", group_a="A", group_b="B")
-        assert len(result) == 2  # score + weight
-        assert set(result["feature"]) == {"score", "weight"}
+        assert len(result) == 2  # curated defaults present in this fixture
+        assert set(result["feature"]) == {"length", "mw"}
 
     def test_missing_feature_is_ignored(self):
         ds = make_dataset()
@@ -112,6 +114,11 @@ class TestCompareGroups:
         ds = make_dataset()
         with pytest.raises(ValueError, match="group_col 'no_such_col' not found"):
             compare_groups(ds, group_col="no_such_col", group_a="A", group_b="B")
+
+    def test_group_typo_raises_value_error(self):
+        ds = make_dataset()
+        with pytest.raises(ValueError, match="group value"):
+            compare_groups(ds, group_col="group", group_a="A", group_b="Typo")
 
     def test_empty_result_when_no_valid_features(self):
         ds = make_dataset()
@@ -240,6 +247,8 @@ def make_ds_a(name="dataset_A"):
         "sequence":   ["SEQ"] * 4,
         "score":      [1.0, 2.0, 3.0, 4.0],
         "weight":     [10.0, 20.0, 30.0, 40.0],
+        "length":     [10.0, 20.0, 30.0, 40.0],
+        "mw":         [100.0, 200.0, 300.0, 400.0],
     })
     return BiasDataset(name=name, table=df, level="protein")
 
@@ -252,6 +261,8 @@ def make_ds_b(name="dataset_B"):
         "sequence":   ["SEQ"] * 4,
         "score":      [100.0, 110.0, 120.0, 130.0],
         "weight":     [200.0, 210.0, 220.0, 230.0],
+        "length":     [100.0, 110.0, 120.0, 130.0],
+        "mw":         [1000.0, 1100.0, 1200.0, 1300.0],
         "extra_only_b": [1.0, 2.0, 3.0, 4.0],  # not in ds_a
     })
     return BiasDataset(name=name, table=df, level="protein")
@@ -264,9 +275,9 @@ class TestCompareDatasets:
 
     def test_one_row_per_shared_feature(self):
         result = compare_datasets(make_ds_a(), make_ds_b())
-        # shared features: score, weight (extra_only_b excluded)
+        # shared curated default features: length, mw (extra_only_b excluded)
         assert len(result) == 2
-        assert set(result["feature"]) == {"score", "weight"}
+        assert set(result["feature"]) == {"length", "mw"}
 
     def test_comparison_type_column(self):
         result = compare_datasets(make_ds_a(), make_ds_b())
@@ -342,6 +353,14 @@ class TestCompareDatasets:
         with pytest.raises(ValueError, match="same_name"):
             compare_datasets(ds_a, ds_b)
 
+    def test_level_mismatch_raises_value_error(self):
+        ds_a = make_ds_a()
+        df_b = make_ds_b().table.copy()
+        df_b["level"] = "peptide"
+        ds_b = BiasDataset(name="dataset_B", table=df_b, level="peptide")
+        with pytest.raises(ValueError, match="does not match"):
+            compare_datasets(ds_a, ds_b)
+
     def test_unequal_sizes_are_handled(self):
         """Datasets with different numbers of rows should work fine."""
         df_small = pd.DataFrame({
@@ -363,4 +382,3 @@ class TestCompareDatasets:
         _ = compare_datasets(ds_a, ds_b)
         assert "__dataset_group" not in ds_a.table.columns
         assert "__dataset_group" not in ds_b.table.columns
-

@@ -2,6 +2,9 @@ import copy
 from dataclasses import dataclass, field
 from typing import Literal
 import pandas as pd
+from pathlib import Path
+
+from biastracker.preprocessing import select_numeric_features
 
 def check_protperties_available():
     """
@@ -60,10 +63,7 @@ class BiasDataset:
         )
 
     def available_features(self, features: list[str] | None = None) -> list[str]:
-        numeric_cols = self.table.select_dtypes(include='number').columns.tolist()
-        if features is None:
-            return numeric_cols
-        return [f for f in features if f in numeric_cols]
+        return select_numeric_features(self.table, features=features)
 
     def ids(self) -> set[str]:
         if self.id_col is not None and self.id_col in self.table.columns:
@@ -142,11 +142,22 @@ def load_standard_table(
     group_col: str | None = None,
     id_col: str = "primary_id"
 ) -> BiasDataset:
-    """Load a standard CSV file directly using pandas."""
+    """Load a standard delimited table directly using pandas.
+
+    CSV files are read comma-separated. TSV, TAB, and TXT files are read
+    tab-separated. Other extensions try comma first and retry tab-separated if
+    comma parsing produces a single column.
+    """
+    path_obj = Path(path)
+    ext = path_obj.suffix.lower()
+
     try:
-        df = pd.read_csv(path)
+        sep = "\t" if ext in {".tsv", ".tab", ".txt"} else ","
+        df = pd.read_csv(path, sep=sep)
+        if sep == "," and df.shape[1] == 1:
+            df = pd.read_csv(path, sep="\t")
     except Exception as e:
-        raise RuntimeError(f"Failed to load CSV from {path}: {e}") from e
+        raise RuntimeError(f"Failed to load standard table from {path}: {e}") from e
 
     if "sequence" not in df.columns:
         raise ValueError('Standard table must contain a "sequence" column')

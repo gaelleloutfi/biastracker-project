@@ -29,3 +29,87 @@ biastracker run examples/ghost_proteome_config.yaml
 **Expected outputs:**
 - `examples/results/tables/` (Contains CSV reports)
 - `examples/results/figures/` (Contains PNG plots)
+
+## Annotation Sources
+
+BiasTracker can use several annotation sources for enrichment analysis:
+
+- The PANTHER API is used for GO biological process, GO cellular component, GO molecular function, PANTHER GO-slim, protein class, PANTHER pathway, and Reactome pathway annotations.
+- The HPA `subcellular_location.tsv.zip` download is used for subcellular location annotations.
+- HPA UMAP and CZ Biohub UMAP annotation workflows are intentionally not implemented yet.
+- UniProt ID mapping is used when HPA Ensembl gene IDs need to match `primary_id` values from UniProt-based protein tables.
+
+BiasTracker protein tables usually use UniProt accessions, especially when they come from `protperties`. HPA subcellular annotations use Ensembl gene IDs in the `Gene` column. When combining HPA annotations with `protperties` protein tables, use `map_to_uniprot: true` so the HPA rows are normalized to UniProt accessions before enrichment.
+
+## PANTHER API Example
+
+Use `type: panther_api` to fetch annotations for IDs already loaded in a dataset. The workflow reads `id_col` from the named dataset, calls PANTHER, caches the response, and exports the normalized annotation table.
+
+```yaml
+annotations:
+  - name: panther_api
+    type: panther_api
+    dataset: my_protein_dataset
+    id_col: primary_id
+    organism: 9606
+    categories:
+      - go_bp
+      - go_cc
+      - go_mf
+      - protein_class
+      - panther_pathway
+      - reactome_pathway
+```
+
+## HPA Subcellular Example
+
+Use `type: hpa_subcellular` with either a local `path` or the public HPA URL. For UniProt-based protein tables, enable mapping from HPA Ensembl IDs to UniProt.
+
+```yaml
+annotations:
+  - name: hpa_subcellular
+    type: hpa_subcellular
+    url: https://www.proteinatlas.org/download/tsv/subcellular_location.tsv.zip
+    map_to_uniprot: true
+    from_ns: Ensembl
+    to_ns: UniProtKB
+```
+
+For offline or pinned analyses, download the HPA file once and use `path: data/subcellular_location.tsv.zip` instead of `url`.
+
+## API Annotation Workflow Example
+
+The example config at `examples/api_annotations_config.yaml` is designed to run without internet access. It loads a tiny standard protein CSV, uses a precomputed local PANTHER API cache for `type: panther_api`, loads a tiny local HPA subcellular TSV, maps the HPA Ensembl IDs to UniProt accessions from the toy protein table, and runs enrichment for the `case` group.
+
+```bash
+biastracker run examples/api_annotations_config.yaml
+```
+
+To run the same pattern against the live PANTHER API, remove the toy `cache_dir` or point it at an empty writable cache directory:
+
+```yaml
+annotations:
+  - name: panther_api
+    type: panther_api
+    dataset: my_protein_dataset
+    id_col: primary_id
+    organism: 9606
+    cache_dir: .cache/biastracker/panther
+    categories:
+      - go_bp
+      - go_cc
+      - go_mf
+      - protein_class
+      - panther_pathway
+      - reactome_pathway
+```
+
+## Reproducibility
+
+API responses and normalized annotations are cached. Workflow runs export normalized annotation tables and metadata into `results/annotations/`, so downstream enrichment can be inspected or reused without depending on a live service response. Network tests are optional; the main toy examples avoid network access by using local data and precomputed cache files.
+
+To run the optional live PANTHER, HPA, and UniProt smoke tests:
+
+```bash
+BIASTRACKER_RUN_NETWORK_TESTS=1 pytest tests/test_network_smoke.py
+```

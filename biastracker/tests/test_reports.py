@@ -1,8 +1,12 @@
+import json
 import pandas as pd
 
-from biastracker.dataset import BiasDataset
+from biastracker.dataset import AnnotationSet, BiasDataset
 from biastracker.reports import (
+    export_annotations_for_workflow,
     prepare_output_dirs,
+    save_annotation_metadata,
+    save_annotation_set,
     save_table,
     save_dataset_summary,
     save_group_comparison_results,
@@ -88,3 +92,71 @@ def test_save_enrichment_results(tmp_path):
     path2 = save_enrichment_results(df, output_dir, "custom_enrichment")
     assert path2.name == "custom_enrichment.csv"
     assert path2.exists()
+
+def test_save_annotation_set(tmp_path):
+    df = pd.DataFrame({
+        "primary_id": ["P1", "P2"],
+        "term_name": ["Nucleus", "Cytosol"],
+    })
+    annotation_set = AnnotationSet(
+        name="locations",
+        source="test",
+        table=df,
+        metadata={"version": "1"},
+    )
+
+    path = save_annotation_set(annotation_set, tmp_path / "results")
+
+    assert path == tmp_path / "results" / "annotations" / "locations.csv"
+    assert path.exists()
+
+    saved = pd.read_csv(path)
+    assert list(saved.columns) == ["primary_id", "term_name", "term_id", "category"]
+    assert list(saved["primary_id"]) == ["P1", "P2"]
+
+def test_save_annotation_metadata_counts(tmp_path):
+    df = pd.DataFrame({
+        "primary_id": ["P1", "P1", "P2"],
+        "term_name": ["Nucleus", "Cytosol", "Nucleus"],
+    })
+    annotation_set = AnnotationSet(
+        name="locations",
+        source="test",
+        table=df,
+        metadata={"version": "1"},
+    )
+
+    path = save_annotation_metadata(annotation_set, tmp_path / "results")
+
+    assert path == tmp_path / "results" / "annotations" / "locations.metadata.json"
+    assert path.exists()
+
+    metadata = json.loads(path.read_text())
+    assert metadata["name"] == "locations"
+    assert metadata["source"] == "test"
+    assert metadata["n_rows"] == 3
+    assert metadata["n_unique_ids"] == 2
+    assert metadata["n_terms"] == 2
+    assert metadata["metadata"] == {"version": "1"}
+    assert "created_at" in metadata
+
+def test_export_annotations_for_workflow(tmp_path):
+    annotation_set = AnnotationSet(
+        name="locations",
+        source="test",
+        table=pd.DataFrame({
+            "primary_id": ["P1"],
+            "term_name": ["Nucleus"],
+        }),
+    )
+
+    paths = export_annotations_for_workflow(
+        {"custom_name": annotation_set},
+        tmp_path / "results",
+    )
+
+    assert paths == [
+        tmp_path / "results" / "annotations" / "locations.csv",
+        tmp_path / "results" / "annotations" / "locations.metadata.json",
+    ]
+    assert all(path.exists() for path in paths)

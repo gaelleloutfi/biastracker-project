@@ -14,6 +14,7 @@ dependencies = [
     "scipy",
     "statsmodels",
     "matplotlib",
+    "requests",
     "typer",
     "pydantic",
     "pyyaml",

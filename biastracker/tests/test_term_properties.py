@@ -75,7 +75,7 @@ class TestSummarizeTermProperties:
         assert list(result.columns) == expected
 
     def test_one_row_per_term_per_feature(self):
-        result = summarize_term_properties(make_dataset(), make_annotations())
+        result = summarize_term_properties(make_dataset(), make_annotations(), features=["score", "weight"])
         # 2 terms × 2 features = 4 rows
         assert len(result) == 4
         assert set(result["term_name"]) == {"TermA", "TermB"}
@@ -102,7 +102,7 @@ class TestSummarizeTermProperties:
         assert (result["dataset"] == "my_exp").all()
 
     def test_term_id_and_category_propagated(self):
-        result = summarize_term_properties(make_dataset(), make_annotations())
+        result = summarize_term_properties(make_dataset(), make_annotations(), features=["score"])
         row_a = result[result["term_name"] == "TermA"].iloc[0]
         assert row_a["term_id"] == "TA"
         assert row_a["category"] == "CatX"
@@ -175,6 +175,26 @@ class TestSummarizeTermProperties:
         assert row["n"] == 4   # 4 non-NaN values
         assert not np.isnan(row["mean"])
 
+    def test_features_none_uses_curated_defaults(self):
+        df = pd.DataFrame({
+            "primary_id": [f"P{i:03d}" for i in range(1, 7)],
+            "level": ["protein"] * 6,
+            "sequence": ["SEQ"] * 6,
+            "length": [10, 11, 12, 13, 14, 15],
+            "score": [1, 2, 3, 4, 5, 6],
+        })
+        ds = BiasDataset(name="curated_ds", table=df, level="protein")
+        ann = AnnotationSet(
+            name="ann",
+            source="custom",
+            table=pd.DataFrame([
+                {"primary_id": f"P{i:03d}", "term_name": "TermA", "term_id": "TA", "category": "X"}
+                for i in range(1, 7)
+            ]),
+        )
+        result = summarize_term_properties(ds, ann)
+        assert set(result["feature"]) == {"length"}
+
 
 # ---------------------------------------------------------------------------
 # compare_term_vs_rest
@@ -201,7 +221,7 @@ class TestCompareTermVsRest:
         assert list(result.columns) == expected
 
     def test_one_row_per_term_per_feature(self):
-        result = compare_term_vs_rest(make_dataset(), make_annotations())
+        result = compare_term_vs_rest(make_dataset(), make_annotations(), features=["score", "weight"])
         # 2 terms × 2 features = 4 rows
         assert len(result) == 4
 
@@ -256,7 +276,7 @@ class TestCompareTermVsRest:
         assert (result["dataset"] == "proteomics_run_1").all()
 
     def test_term_id_and_category_in_output(self):
-        result = compare_term_vs_rest(make_dataset(), make_annotations())
+        result = compare_term_vs_rest(make_dataset(), make_annotations(), features=["score"])
         row_a = result[result["term_name"] == "TermA"].iloc[0]
         assert row_a["term_id"] == "TA"
         assert row_a["category"] == "CatX"

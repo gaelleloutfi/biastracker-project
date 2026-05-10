@@ -70,11 +70,9 @@ _COMPARE_COLS = [
 def _resolve_features(df: pd.DataFrame, features: Optional[List[str]]) -> List[str]:
     """Return numeric feature columns to analyse.
 
-    When *features* is ``None``, all numeric columns are used.  Otherwise the
-    list is filtered to those that exist and are numeric.
+    When *features* is ``None``, the curated default numeric features are used.
+    Otherwise the list is filtered to those that exist and are numeric.
     """
-    if features is None:
-        return df.select_dtypes(include="number").columns.tolist()
     return select_numeric_features(df, features=features)
 
 
@@ -151,7 +149,8 @@ def summarize_term_properties(
     annotations:
         Term→protein mapping as an :class:`~biastracker.dataset.AnnotationSet`.
     features:
-        Numeric columns to summarize.  ``None`` uses all numeric columns.
+        Numeric columns to summarize.  ``None`` uses the curated BiasTracker
+        default feature list.
     min_term_size:
         Minimum number of dataset proteins that must be annotated with a term
         for it to be included in the output.
@@ -211,7 +210,8 @@ def compare_term_vs_rest(
     annotations:
         Term→protein mapping as an :class:`~biastracker.dataset.AnnotationSet`.
     features:
-        Numeric columns to test.  ``None`` uses all numeric columns.
+        Numeric columns to test.  ``None`` uses the curated BiasTracker
+        default feature list.
     min_term_size:
         Minimum term size (after intersecting with dataset IDs).
     id_col:

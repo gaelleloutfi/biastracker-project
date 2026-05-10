@@ -1,8 +1,10 @@
+import json
+from datetime import datetime, timezone
 import pandas as pd
 from pathlib import Path
 from typing import Union, Optional, Dict
 
-from biastracker.dataset import BiasDataset
+from biastracker.dataset import AnnotationSet, BiasDataset
 from biastracker.analysis.summary import summarize_dataset
 
 def prepare_output_dirs(output_dir: Union[str, Path]) -> Dict[str, Path]:
@@ -105,3 +107,66 @@ def save_enrichment_results(
         The path to the saved CSV file.
     """
     return save_table(enrichment_df, output_dir, filename)
+
+def save_annotation_set(
+    annotation_set: AnnotationSet,
+    output_dir: Union[str, Path],
+    filename: Optional[str] = None,
+) -> Path:
+    """
+    Saves a standardized AnnotationSet table to CSV in the annotations folder.
+    """
+    annotations_dir = Path(output_dir) / "annotations"
+    annotations_dir.mkdir(parents=True, exist_ok=True)
+
+    filename = filename or f"{annotation_set.name}.csv"
+    if not filename.endswith(".csv"):
+        filename += ".csv"
+
+    out_path = annotations_dir / filename
+    annotation_set.table.to_csv(out_path, index=False)
+    return out_path
+
+def save_annotation_metadata(
+    annotation_set: AnnotationSet,
+    output_dir: Union[str, Path],
+    filename: Optional[str] = None,
+) -> Path:
+    """
+    Saves AnnotationSet metadata to JSON in the annotations folder.
+    """
+    annotations_dir = Path(output_dir) / "annotations"
+    annotations_dir.mkdir(parents=True, exist_ok=True)
+
+    filename = filename or f"{annotation_set.name}.metadata.json"
+    if not filename.endswith(".json"):
+        filename += ".json"
+
+    metadata = {
+        "name": annotation_set.name,
+        "source": annotation_set.source,
+        "n_rows": int(len(annotation_set.table)),
+        "n_unique_ids": int(annotation_set.table[annotation_set.id_col].nunique()),
+        "n_terms": int(annotation_set.table[annotation_set.term_col].nunique()),
+        "metadata": annotation_set.metadata,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    out_path = annotations_dir / filename
+    with out_path.open("w", encoding="utf-8") as handle:
+        json.dump(metadata, handle, indent=2, sort_keys=True, default=str)
+        handle.write("\n")
+    return out_path
+
+def export_annotations_for_workflow(
+    loaded_annotations: dict[str, AnnotationSet],
+    output_dir: Union[str, Path],
+) -> list[Path]:
+    """
+    Exports all annotation sets loaded for a workflow.
+    """
+    paths: list[Path] = []
+    for annotation_set in loaded_annotations.values():
+        paths.append(save_annotation_set(annotation_set, output_dir))
+        paths.append(save_annotation_metadata(annotation_set, output_dir))
+    return paths

@@ -310,6 +310,12 @@ class TestRunGroupOra:
         with pytest.raises(ValueError, match="group_col 'bad_col' not found"):
             run_group_ora(ds, group_col="bad_col", query_group="query", annotations=ann)
 
+    def test_query_group_typo_raises_value_error(self):
+        ds = make_dataset()
+        ann = make_annotations()
+        with pytest.raises(ValueError, match="query_group 'qurey' not found"):
+            run_group_ora(ds, group_col="group", query_group="qurey", annotations=ann)
+
     def test_missing_id_col_raises_value_error(self):
         ds = make_dataset()
         ann = make_annotations()

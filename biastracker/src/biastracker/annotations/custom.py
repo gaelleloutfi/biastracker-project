@@ -26,7 +26,7 @@ def _read_delimited(path: str | os.PathLike) -> pd.DataFrame:
     path = Path(path)
     ext = path.suffix.lower()
 
-    if ext in {".tsv", ".tab"}:
+    if ext in {".tsv", ".tab", ".txt"}:
         return pd.read_csv(path, sep="\t", dtype=str)
 
     # Try comma first

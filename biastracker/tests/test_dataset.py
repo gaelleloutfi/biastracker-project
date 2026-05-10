@@ -111,3 +111,10 @@ def test_load_standard_table_missing_sequence(tmp_path, toy_protein_df):
 def test_load_standard_table_group_col_preserved(tmp_standard_csv):
     ds = load_standard_table(str(tmp_standard_csv), name="test", level="protein", group_col="group")
     assert ds.group_col == "group"
+
+def test_load_standard_table_tsv(tmp_path, toy_protein_df):
+    tsv_path = tmp_path / "test.tsv"
+    toy_protein_df.to_csv(tsv_path, sep="\t", index=False)
+    ds = load_standard_table(str(tsv_path), name="test", level="protein")
+    assert ds.name == "test"
+    assert list(ds.table.columns) == list(toy_protein_df.columns)

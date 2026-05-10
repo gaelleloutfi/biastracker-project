@@ -14,6 +14,9 @@ def load_umap_subcellular(
     location_col: Optional[str] = None,
 ) -> AnnotationSet:
     """Load a CZ Biohub subcellular UMAP/organelle table into an AnnotationSet.
+
+    Annotation IDs must match the dataset ID namespace. UniProt accessions are
+    preferred for BiasTracker protein-level datasets.
     
     Parameters
     ----------
@@ -69,8 +72,8 @@ def load_umap_subcellular(
     
     out = pd.DataFrame()
     out["primary_id"] = df[id_col].astype(str).str.strip()
-    out["term_name"] = df[location_col]
-    out["term_id"] = "UMAP:" + out["term_name"].str.replace(' ', '_')
+    out["term_name"] = df[location_col].astype(str).str.strip()
+    out["term_id"] = ("UMAP:" + out["term_name"].str.replace(' ', '_')).str.strip()
     out["source"] = "CZBIOHUB_SUBCELLULAR_UMAP"
     out["category"] = "subcellular_location"
 

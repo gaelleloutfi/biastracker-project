@@ -5,6 +5,10 @@ from biastracker.cli import app
 
 runner = CliRunner()
 
+def _combined_output(result):
+    stderr = result.stderr if result.stderr_bytes is not None else ""
+    return (result.stdout or "") + (stderr or "") + (result.output or "")
+
 @pytest.fixture
 def run_env(tmp_path):
     data_dir = tmp_path / "data"
@@ -103,4 +107,5 @@ def test_run_unsupported_dataset(run_env):
 
     result = runner.invoke(app, ["run", str(config_file)])
     assert result.exit_code == 1
-    assert "Only 'standard_csv' is supported" in result.stdout
+    output = _combined_output(result)
+    assert "Unsupported dataset type 'unknown_type'" in output
