@@ -86,8 +86,9 @@ def fetch_uniprot_sequences(
     if not to_fetch:
         return result
     
-    # Fetch in batches
     missing_count = 0
+    missing_isoforms = {}
+    
     for i in range(0, len(to_fetch), batch_size):
         batch = to_fetch[i:i + batch_size]
         fetched = _fetch_batch_from_uniprot(batch, timeout_s)
@@ -107,11 +108,72 @@ def fetch_uniprot_sequences(
                     # Cache write failed, but we still have the result
                     pass
             else:
-                missing_count += 1
+                if "-" in acc:
+                    base_acc = acc.split("-")[0]
+                    missing_isoforms[acc] = base_acc
+                else:
+                    missing_count += 1
         
         # Be polite to UniProt servers
         if i + batch_size < len(to_fetch):
             time.sleep(0.5)
+            
+    # Handle missing isoforms by falling back to their canonical forms
+    if missing_isoforms:
+        bases_to_fetch = list(set(missing_isoforms.values()))
+        # Remove those we might have already fetched in this run
+        bases_to_fetch = [b for b in bases_to_fetch if b not in result]
+        
+        # We can also check if the base is already in cache
+        bases_to_actually_fetch = []
+        resolved_bases = {}
+        for b in bases_to_fetch:
+            cached_file = cache_path / f"{b}.json"
+            if cached_file.exists():
+                try:
+                    with open(cached_file, "r") as f:
+                        data = json.load(f)
+                        if "sequence" in data:
+                            resolved_bases[b] = data["sequence"]
+                            continue
+                except (json.JSONDecodeError, IOError):
+                    pass
+            bases_to_actually_fetch.append(b)
+            
+        for i in range(0, len(bases_to_actually_fetch), batch_size):
+            batch = bases_to_actually_fetch[i:i + batch_size]
+            fetched = _fetch_batch_from_uniprot(batch, timeout_s)
+            
+            for base_acc in batch:
+                if base_acc in fetched:
+                    sequence = fetched[base_acc]
+                    resolved_bases[base_acc] = sequence
+                    
+                    cached_file = cache_path / f"{base_acc}.json"
+                    try:
+                        with open(cached_file, "w") as f:
+                            json.dump({"accession": base_acc, "sequence": sequence}, f)
+                    except IOError:
+                        pass
+            
+            if i + batch_size < len(bases_to_actually_fetch):
+                time.sleep(0.5)
+                
+        # Now map the resolved bases back to the requested isoforms
+        for iso_acc, base_acc in missing_isoforms.items():
+            if base_acc in resolved_bases:
+                sequence = resolved_bases[base_acc]
+                result[iso_acc] = sequence
+                
+                # Cache the isoform as well so we don't have to resolve it again
+                cached_file = cache_path / f"{iso_acc}.json"
+                try:
+                    with open(cached_file, "w") as f:
+                        json.dump({"accession": iso_acc, "sequence": sequence}, f)
+                except IOError:
+                    pass
+            else:
+                missing_count += 1
     
     if missing_count > 0:
         warnings.warn(
@@ -130,36 +192,30 @@ def _fetch_batch_from_uniprot(
     """
     Fetch a batch of sequences from UniProt REST API.
     
-    Uses UniProt's search/stream API endpoint with query syntax to retrieve 
-    sequences in FASTA format for multiple accessions in a single request.
-    Query format: (accession:P12345 OR accession:Q9XXX1 OR ...)
+    Uses UniProt's accessions endpoint to retrieve sequences in JSON format
+    for multiple accessions in a single request.
     
     Args:
         accessions: List of UniProt accession IDs to fetch.
         timeout_s: HTTP request timeout in seconds.
     
     Returns:
-        Dictionary mapping accession IDs to amino acid sequences.
-        Only successfully retrieved sequences are included.
+        Dictionary mapping accession IDs (both primary and secondary) to amino
+        acid sequences. Only successfully retrieved sequences are included.
     """
     if not accessions:
         return {}
     
-    # Build query with OR logic: (accession:P12345 OR accession:Q9XXX1 OR ...)
-    query_parts = [f"accession:{acc}" for acc in accessions]
-    query = "(" + " OR ".join(query_parts) + ")"
-    
-    # UniProt search/stream endpoint supports query syntax
-    base_url = "https://rest.uniprot.org/uniprotkb/stream"
+    base_url = "https://rest.uniprot.org/uniprotkb/accessions"
     params = {
-        "query": query,
-        "format": "fasta",
+        "accessions": ",".join(accessions),
+        "format": "json",
     }
     
     try:
         response = requests.get(base_url, params=params, timeout=timeout_s)
         response.raise_for_status()
-        fasta_text = response.text
+        data = response.json()
     except Exception as e:
         warnings.warn(
             f"Failed to fetch batch from UniProt: {e}",
@@ -168,62 +224,20 @@ def _fetch_batch_from_uniprot(
         )
         return {}
     
-    # Parse FASTA response
-    return _parse_fasta(fasta_text)
+    fetched = {}
+    if "results" in data:
+        for entry in data["results"]:
+            seq = entry.get("sequence", {}).get("value")
+            if not seq:
+                continue
+                
+            prim_acc = entry.get("primaryAccession")
+            sec_accs = entry.get("secondaryAccessions", [])
+            
+            if prim_acc:
+                fetched[prim_acc] = seq
+            for sec_acc in sec_accs:
+                fetched[sec_acc] = seq
+                
+    return fetched
 
-
-def _parse_fasta(fasta_text: str) -> dict[str, str]:
-    """
-    Parse FASTA format text into a dictionary of sequences.
-    
-    Extracts accession IDs from FASTA headers and associates them with their
-    sequences. Headers are expected to be in UniProt format:
-    >sp|P12345|PROTEIN_NAME or >tr|Q9XXX1|PROTEIN_NAME
-    
-    Args:
-        fasta_text: FASTA formatted text containing one or more sequences.
-    
-    Returns:
-        Dictionary mapping accession IDs to amino acid sequences (no headers,
-        no newlines, uppercase letters only).
-    """
-    sequences = {}
-    current_acc = None
-    current_seq_parts = []
-    
-    for line in fasta_text.strip().split("\n"):
-        line = line.strip()
-        if not line:
-            continue
-            
-        if line.startswith(">"):
-            # Save previous sequence
-            if current_acc is not None and current_seq_parts:
-                sequences[current_acc] = "".join(current_seq_parts)
-            
-            # Parse new header
-            # Format: >sp|P12345|PROTEIN_NAME or >tr|Q9XXX1|PROTEIN_NAME or >P12345
-            header = line[1:]  # Remove '>'
-            
-            # Extract accession from different formats
-            if "|" in header:
-                # Format: sp|P12345|NAME or tr|P12345|NAME
-                parts = header.split("|")
-                if len(parts) >= 2:
-                    current_acc = parts[1]
-                else:
-                    current_acc = parts[0]
-            else:
-                # Format: P12345 PROTEIN_NAME (take first word)
-                current_acc = header.split()[0] if header else None
-            
-            current_seq_parts = []
-        else:
-            # Sequence line
-            current_seq_parts.append(line)
-    
-    # Don't forget the last sequence
-    if current_acc is not None and current_seq_parts:
-        sequences[current_acc] = "".join(current_seq_parts)
-    
-    return sequences

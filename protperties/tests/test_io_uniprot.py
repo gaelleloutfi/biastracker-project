@@ -11,86 +11,28 @@ import pytest
 from protperties.io_uniprot import (
     fetch_uniprot_sequences,
     _fetch_batch_from_uniprot,
-    _parse_fasta,
 )
 
 # Default timeout value for testing (matches function signature default)
 DEFAULT_TIMEOUT = 30
 
 
-class TestParseFasta:
-    """Tests for FASTA parsing function."""
-    
-    def test_single_sequence_with_pipe_format(self):
-        """Test parsing single sequence with sp|ACC|NAME format."""
-        fasta = """>sp|P12345|PROTEIN_NAME
-MTEYKLVVVG
-AGGVGKSALT"""
-        result = _parse_fasta(fasta)
-        assert result == {"P12345": "MTEYKLVVVGAGGVGKSALT"}
-    
-    def test_multiple_sequences(self):
-        """Test parsing multiple sequences."""
-        fasta = """>sp|P12345|PROT1
-MTEYKLVVVG
-AGGVGKSALT
->tr|Q9XXX1|PROT2
-ARNDCEQ
->sp|O43663|PROT3
-MKWVTFISLLLLFSSAYS"""
-        result = _parse_fasta(fasta)
-        assert len(result) == 3
-        assert result["P12345"] == "MTEYKLVVVGAGGVGKSALT"
-        assert result["Q9XXX1"] == "ARNDCEQ"
-        assert result["O43663"] == "MKWVTFISLLLLFSSAYS"
-    
-    def test_isoform_accession(self):
-        """Test parsing sequence with isoform suffix."""
-        fasta = """>sp|P12345-2|PROT_ISO2
-MTEYKLVVVG"""
-        result = _parse_fasta(fasta)
-        assert result == {"P12345-2": "MTEYKLVVVG"}
-    
-    def test_simple_header_format(self):
-        """Test parsing with simple header (no pipes)."""
-        fasta = """>P12345 Some protein name
-MTEYKLVVVG
-AGGVGKSALT"""
-        result = _parse_fasta(fasta)
-        assert result == {"P12345": "MTEYKLVVVGAGGVGKSALT"}
-    
-    def test_empty_fasta(self):
-        """Test parsing empty FASTA."""
-        assert _parse_fasta("") == {}
-        assert _parse_fasta("\n\n") == {}
-    
-    def test_fasta_with_blank_lines(self):
-        """Test parsing FASTA with blank lines."""
-        fasta = """>sp|P12345|PROT1
-MTEYKLVVVG
-
-AGGVGKSALT
-
->sp|Q9XXX1|PROT2
-ARNDCEQ
-"""
-        result = _parse_fasta(fasta)
-        assert result["P12345"] == "MTEYKLVVVGAGGVGKSALT"
-        assert result["Q9XXX1"] == "ARNDCEQ"
 
 
 class TestFetchBatchFromUniprot:
     """Tests for batch fetching from UniProt (mocked)."""
     
     @patch("protperties.io_uniprot.requests.get")
-    def test_successful_fetch_with_query_syntax(self, mock_get):
-        """Test successful batch fetch uses search/stream endpoint with query syntax."""
+    def test_successful_fetch_with_json_format(self, mock_get):
+        """Test successful batch fetch uses accessions endpoint with json format."""
         mock_response = Mock()
         mock_response.status_code = 200
-        mock_response.text = """>sp|P12345|PROT1
-MTEYKLVVVG
->sp|Q9XXX1|PROT2
-ARNDCEQ"""
+        mock_response.json.return_value = {
+            "results": [
+                {"primaryAccession": "P12345", "sequence": {"value": "MTEYKLVVVG"}},
+                {"primaryAccession": "Q9XXX1", "sequence": {"value": "ARNDCEQ"}}
+            ]
+        }
         mock_get.return_value = mock_response
         
         result = _fetch_batch_from_uniprot(["P12345", "Q9XXX1"], timeout_s=DEFAULT_TIMEOUT)
@@ -101,21 +43,14 @@ ARNDCEQ"""
         }
         mock_get.assert_called_once()
         
-        # Verify the URL is the search/stream endpoint
+        # Verify the URL is the accessions endpoint
         call_args = mock_get.call_args
-        assert call_args[0][0] == "https://rest.uniprot.org/uniprotkb/stream"
+        assert call_args[0][0] == "https://rest.uniprot.org/uniprotkb/accessions"
         
-        # Verify query parameter contains both accessions with OR logic
+        # Verify params
         params = call_args[1]["params"]
-        assert "query" in params
-        query = params["query"]
-        assert "accession:P12345" in query
-        assert "accession:Q9XXX1" in query
-        assert " OR " in query
-        # Verify query is properly formatted with parentheses
-        assert query.startswith("(")
-        assert query.endswith(")")
-        assert params["format"] == "fasta"
+        assert params["accessions"] == "P12345,Q9XXX1"
+        assert params["format"] == "json"
         assert call_args[1]["timeout"] == DEFAULT_TIMEOUT
     
     @patch("protperties.io_uniprot.requests.get")
@@ -152,9 +87,11 @@ ARNDCEQ"""
         """Test when some accessions are not found."""
         mock_response = Mock()
         mock_response.status_code = 200
-        # Only one of the requested accessions is returned
-        mock_response.text = """>sp|P12345|PROT1
-MTEYKLVVVG"""
+        mock_response.json.return_value = {
+            "results": [
+                {"primaryAccession": "P12345", "sequence": {"value": "MTEYKLVVVG"}}
+            ]
+        }
         mock_get.return_value = mock_response
         
         result = _fetch_batch_from_uniprot(["P12345", "INVALID"], timeout_s=DEFAULT_TIMEOUT)
@@ -201,17 +138,19 @@ class TestFetchUniprotSequences:
         assert set(batch_accessions) == {"P12345", "Q9XXX1"}
     
     @patch("protperties.io_uniprot.requests.get")
-    def test_query_contains_both_accessions_with_or(self, mock_get, tmp_path):
+    def test_query_contains_comma_separated_accessions(self, mock_get, tmp_path):
         """
         REAL TEST: Verify the actual URL/params passed to requests.get contains
-        both accessions with OR logic when fetching multiple sequences.
+        the correct accessions formatting.
         """
         mock_response = Mock()
         mock_response.status_code = 200
-        mock_response.text = """>sp|P12345|PROT1
-MTEYKLVVVG
->sp|Q9XXX1|PROT2
-ARNDCEQ"""
+        mock_response.json.return_value = {
+            "results": [
+                {"primaryAccession": "P12345", "sequence": {"value": "MTEYKLVVVG"}},
+                {"primaryAccession": "Q9XXX1", "sequence": {"value": "ARNDCEQ"}}
+            ]
+        }
         mock_get.return_value = mock_response
         
         cache_dir = tmp_path / "cache"
@@ -231,14 +170,9 @@ ARNDCEQ"""
         # Verify the query parameter structure
         call_args = mock_get.call_args
         params = call_args[1]["params"]
-        query = params["query"]
         
-        # CRITICAL ASSERTIONS: Query must contain both accessions with OR logic
-        assert "accession:P12345" in query, f"Query missing P12345: {query}"
-        assert "accession:Q9XXX1" in query, f"Query missing Q9XXX1: {query}"
-        assert " OR " in query, f"Query missing OR logic: {query}"
-        assert query.startswith("("), f"Query should start with '(': {query}"
-        assert query.endswith(")"), f"Query should end with ')': {query}"
+        # CRITICAL ASSERTIONS
+        assert params["accessions"] == "P12345,Q9XXX1"
     
     @patch("protperties.io_uniprot._fetch_batch_from_uniprot")
     def test_cache_hit_no_network_call(self, mock_fetch, tmp_path):
@@ -402,27 +336,31 @@ ARNDCEQ"""
         mock_fetch.assert_called_once()
     
     @patch("protperties.io_uniprot._fetch_batch_from_uniprot")
-    def test_isoform_accessions(self, mock_fetch, tmp_path):
-        """Test fetching sequences for isoform accessions."""
-        mock_fetch.return_value = {
-            "P12345-2": "ISOFORM_SEQUENCE",
-            "Q9XXX1-3": "ANOTHER_ISOFORM",
-        }
+    def test_isoform_fallback(self, mock_fetch, tmp_path):
+        """Test fallback to canonical accession when isoform is missing."""
+        # First call gets nothing, second call (fallback) gets canonical
+        def mock_fetch_side_effect(batch, timeout):
+            if "A0AV96-2" in batch:
+                return {} # Isoform missing
+            elif "A0AV96" in batch:
+                return {"A0AV96": "CANONICAL_SEQUENCE"}
+            return {}
+            
+        mock_fetch.side_effect = mock_fetch_side_effect
         
         cache_dir = tmp_path / "cache"
         result = fetch_uniprot_sequences(
-            ["P12345-2", "Q9XXX1-3"],
+            ["A0AV96-2"],
             cache_dir=cache_dir,
         )
         
+        # The result for the isoform should be the canonical sequence
         assert result == {
-            "P12345-2": "ISOFORM_SEQUENCE",
-            "Q9XXX1-3": "ANOTHER_ISOFORM",
+            "A0AV96-2": "CANONICAL_SEQUENCE"
         }
         
         # Check that isoform accessions are cached properly
-        assert (cache_dir / "P12345-2.json").exists()
-        assert (cache_dir / "Q9XXX1-3.json").exists()
+        assert (cache_dir / "A0AV96-2.json").exists()
     
     @patch("protperties.io_uniprot._fetch_batch_from_uniprot")
     def test_default_cache_dir(self, mock_fetch, tmp_path, monkeypatch):
