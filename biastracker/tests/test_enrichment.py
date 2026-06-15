@@ -1,11 +1,17 @@
 """Tests for biastracker.analysis.enrichment."""
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 
 from biastracker.dataset import AnnotationSet, BiasDataset
-from biastracker.analysis.enrichment import run_ora, run_group_ora
+from biastracker.analysis.enrichment import (
+    run_dataset_fgsea,
+    run_fgsea,
+    run_ora,
+    run_group_ora,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -338,3 +344,163 @@ class TestRunGroupOra:
         result = run_group_ora(ds, group_col="group", query_group="query", annotations=ann)
         assert "odds_ratio" in result.columns
         assert (result["odds_ratio"] >= 0).all()
+
+
+class TestRunFgsea:
+
+    def test_top_ranked_term_has_positive_enrichment_score(self):
+        ann = make_annotations()
+        ranks = pd.Series(
+            [6, 5, 4, 3, 2, 1, 0, -1, -2, -3],
+            index=[f"P{i:03d}" for i in range(1, 11)],
+        )
+
+        result = run_fgsea(
+            ranks,
+            annotations=ann,
+            min_term_size=2,
+            n_permutations=100,
+            seed=1,
+        )
+
+        row = result[result["term_name"] == "TermA"].iloc[0]
+        assert row["es"] > 0
+        assert row["nes"] > 0
+        assert set(row["leading_edge"].split(";")) == {"P001", "P002", "P003", "P004"}
+
+    def test_bottom_ranked_term_has_negative_enrichment_score(self):
+        ann = make_annotations()
+        ranks = pd.Series(
+            [6, 5, 4, 3, 2, 1, 0, -1, -2, -3],
+            index=[f"P{i:03d}" for i in range(1, 11)],
+        )
+
+        result = run_fgsea(
+            ranks,
+            annotations=ann,
+            min_term_size=2,
+            n_permutations=100,
+            seed=1,
+        )
+
+        row = result[result["term_name"] == "TermB"].iloc[0]
+        assert row["es"] < 0
+        assert row["nes"] < 0
+
+    def test_seed_makes_permutation_results_reproducible(self):
+        ann = make_annotations()
+        ranks = pd.Series(
+            [6, 5, 4, 3, 2, 1, 0, -1, -2, -3],
+            index=[f"P{i:03d}" for i in range(1, 11)],
+        )
+
+        result1 = run_fgsea(ranks, ann, min_term_size=2, n_permutations=50, seed=7)
+        result2 = run_fgsea(ranks, ann, min_term_size=2, n_permutations=50, seed=7)
+
+        pd.testing.assert_frame_equal(result1, result2)
+
+    def test_empty_when_no_terms_pass_size_filter(self):
+        ann = make_annotations()
+        ranks = pd.Series(
+            [6, 5, 4, 3, 2, 1, 0, -1, -2, -3],
+            index=[f"P{i:03d}" for i in range(1, 11)],
+        )
+
+        result = run_fgsea(ranks, ann, min_term_size=5, n_permutations=10, seed=1)
+
+        assert result.empty
+        assert list(result.columns) == [
+            "term_id",
+            "term_name",
+            "source",
+            "category",
+            "set_size",
+            "es",
+            "nes",
+            "p_value",
+            "fdr",
+            "leading_edge",
+        ]
+
+    def test_dataset_wrapper_adds_metadata_columns(self):
+        ds = make_dataset(name="ranked_ds")
+        ann = make_annotations()
+
+        result = run_dataset_fgsea(
+            ds,
+            score_col="score",
+            annotations=ann,
+            min_term_size=2,
+            n_permutations=50,
+            seed=1,
+        )
+
+        assert list(result.columns[:2]) == ["dataset", "score_col"]
+        assert (result["dataset"] == "ranked_ds").all()
+        assert (result["score_col"] == "score").all()
+
+    def test_missing_score_col_raises_value_error(self):
+        ds = make_dataset()
+        ann = make_annotations()
+
+        with pytest.raises(ValueError, match="score_col 'missing' not found"):
+            run_dataset_fgsea(ds, score_col="missing", annotations=ann)
+
+    def test_infinite_scores_excluded_no_nan_es(self):
+        """inf/-inf scores must be silently dropped; ES/NES must never be NaN."""
+        ann = make_annotations()
+        ranks = pd.Series(
+            [np.inf, 5, 4, 3, 2, 1, 0, -1, -2, -np.inf],
+            index=[f"P{i:03d}" for i in range(1, 11)],
+        )
+        result = run_fgsea(ranks, ann, min_term_size=2, n_permutations=100, seed=1)
+        assert result["es"].notna().all(), "ES must not be NaN when inf scores are present"
+        assert result["nes"].notna().all(), "NES must not be NaN when inf scores are present"
+
+    def test_nan_index_entries_excluded_from_ranking(self):
+        """NaN index values must not appear as 'nan' in leading_edge or corrupt results."""
+        ann = make_annotations()
+        ranks = pd.Series(
+            [6, 5, 4, 3, 2, 1, 0, -1, -2, -3],
+            index=[f"P{i:03d}" for i in range(1, 9)] + [float("nan"), "P010"],
+        )
+        result = run_fgsea(ranks, ann, min_term_size=2, n_permutations=100, seed=1)
+        assert isinstance(result, pd.DataFrame)
+        for le in result["leading_edge"].dropna():
+            assert "nan" not in le.split(";"), (
+                "NaN index entry must not appear as 'nan' in leading_edge"
+            )
+
+    def test_tied_scores_do_not_raise(self):
+        """Ties in scores must not cause errors; results must be a valid DataFrame."""
+        ann = make_annotations()
+        ranks = pd.Series(
+            [3, 3, 3, 3, 1, 1, 1, 1, 0, 0],
+            index=[f"P{i:03d}" for i in range(1, 11)],
+        )
+        result = run_fgsea(ranks, ann, min_term_size=2, n_permutations=50, seed=1)
+        assert isinstance(result, pd.DataFrame)
+        assert len(result) > 0
+        assert result["es"].notna().all()
+
+    def test_shuffled_ranking_no_nan_results(self):
+        """Random permutation of scores must produce a complete, finite result table."""
+        ann = make_annotations()
+        rng = np.random.default_rng(42)
+        shuffled_scores = rng.permutation(np.linspace(-3, 3, 10))
+        ranks = pd.Series(shuffled_scores, index=[f"P{i:03d}" for i in range(1, 11)])
+        result = run_fgsea(ranks, ann, min_term_size=2, n_permutations=200, seed=42)
+        assert isinstance(result, pd.DataFrame)
+        assert result["es"].notna().all()
+        assert result["nes"].notna().all()
+        assert result["fdr"].notna().all()
+
+    def test_output_sorted_by_fdr(self):
+        """Results must be sorted by FDR in ascending order, not raw p-value."""
+        ann = make_annotations()
+        ranks = pd.Series(
+            [6, 5, 4, 3, 2, 1, 0, -1, -2, -3],
+            index=[f"P{i:03d}" for i in range(1, 11)],
+        )
+        result = run_fgsea(ranks, ann, min_term_size=2, n_permutations=200, seed=1)
+        assert list(result["fdr"]) == sorted(result["fdr"].tolist())

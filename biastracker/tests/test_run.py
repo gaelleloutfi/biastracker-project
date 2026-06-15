@@ -60,6 +60,16 @@ def run_env(tmp_path):
                     "query_group": "A",
                     "min_term_size": 1
                 }
+            ],
+            "fgsea": [
+                {
+                    "dataset": "ds1",
+                    "annotation": "ann1",
+                    "score_col": "val1",
+                    "min_term_size": 1,
+                    "n_permutations": 25,
+                    "seed": 1
+                }
             ]
         },
         "output": {
@@ -95,6 +105,10 @@ def test_run_command_success(run_env):
     # Check enrichment
     assert (results_dir / "tables" / "enrichment__ds1__A__ann1.csv").exists()
     assert (results_dir / "figures" / "enrichment_dotplot__ds1__A__ann1.png").exists()
+
+    # Check FGSEA
+    assert (results_dir / "tables" / "fgsea__ds1__val1__ann1.csv").exists()
+    assert (results_dir / "figures" / "fgsea_dotplot__ds1__val1__ann1.png").exists()
 
 def test_run_unsupported_dataset(run_env):
     tmp_path, config_file = run_env

@@ -20,7 +20,7 @@ from biastracker.reports import (
     prepare_output_dirs,
 )
 from biastracker.analysis.compare import compare_groups
-from biastracker.analysis.enrichment import run_group_ora
+from biastracker.analysis.enrichment import run_dataset_fgsea, run_group_ora
 from biastracker.plots import plot_violin, plot_cdf, plot_enrichment_dotplot
 
 logger = logging.getLogger(__name__)
@@ -290,6 +290,46 @@ def run_workflow(config: Dict[str, Any], config_path: Union[str, Path, None] = N
                 logger.warning("Could not generate enrichment dotplot for '%s' (%s): %s", ds_name, query_group, e)
         else:
             logger.warning(f"Enrichment results empty for '{ds_name}' ({query_group}). Skipping dotplot.")
+
+    # 4. Pre-ranked GSEA
+    for fgsea_conf in analysis_conf.get("fgsea", []):
+        ds_name = fgsea_conf["dataset"]
+        ann_name = fgsea_conf["annotation"]
+        if ds_name not in loaded_datasets:
+            raise ValueError(f"FGSEA references unknown dataset '{ds_name}'")
+        if ann_name not in loaded_annotations:
+            raise ValueError(f"FGSEA references unknown annotation '{ann_name}'")
+
+        dataset = loaded_datasets[ds_name]
+        ann_set = loaded_annotations[ann_name]
+        score_col = fgsea_conf["score_col"]
+        id_col = fgsea_conf.get("id_col", dataset.id_col)
+
+        res = run_dataset_fgsea(
+            dataset=dataset,
+            score_col=score_col,
+            annotations=ann_set,
+            id_col=id_col,
+            min_term_size=fgsea_conf.get("min_term_size", 3),
+            max_term_size=fgsea_conf.get("max_term_size"),
+            n_permutations=fgsea_conf.get("n_permutations", 1000),
+            weight=fgsea_conf.get("weight", 1.0),
+            seed=fgsea_conf.get("seed"),
+            correction=fgsea_conf.get("correction", "fdr_bh"),
+        )
+
+        safe_score = str(score_col).replace("/", "_").replace("\\", "_")
+        out_csv = dirs["tables"] / f"fgsea__{ds_name}__{safe_score}__{ann_name}.csv"
+        res.to_csv(out_csv, index=False)
+
+        if not res.empty:
+            out_plot = dirs["figures"] / f"fgsea_dotplot__{ds_name}__{safe_score}__{ann_name}.png"
+            try:
+                plot_enrichment_dotplot(res, output_path=out_plot)
+            except Exception as e:
+                logger.warning("Could not generate FGSEA dotplot for '%s' (%s): %s", ds_name, score_col, e)
+        else:
+            logger.warning(f"FGSEA results empty for '{ds_name}' ({score_col}). Skipping dotplot.")
 
 
 def _resolve_hpa_subcellular_source(

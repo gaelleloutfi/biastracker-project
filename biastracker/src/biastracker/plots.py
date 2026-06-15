@@ -161,6 +161,19 @@ def plot_enrichment_dotplot(
         odds = finite_odds.fillna(fallback).clip(lower=0)
         sizes = np.clip(np.sqrt(odds) * 80, 20, 500)
         ax.scatter(x, y, s=sizes, alpha=0.8)
+    elif "nes" in df.columns:
+        nes = pd.to_numeric(df["nes"], errors="coerce").fillna(0)
+        colors = ["#d73027" if n > 0 else "#4575b4" for n in nes]
+        ax.scatter(x, y, s=100, c=colors, alpha=0.8)
+        from matplotlib.patches import Patch
+        ax.legend(
+            handles=[
+                Patch(facecolor="#d73027", label="Positive NES (enriched at top)"),
+                Patch(facecolor="#4575b4", label="Negative NES (enriched at bottom)"),
+            ],
+            loc="lower right",
+            fontsize=8,
+        )
     else:
         ax.scatter(x, y, s=100, alpha=0.8)
         

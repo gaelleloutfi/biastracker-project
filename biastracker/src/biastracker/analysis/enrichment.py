@@ -1,19 +1,23 @@
-"""Over-representation analysis (ORA) for BiasTracker.
+"""Enrichment analysis for BiasTracker.
 
-This module provides term-by-term Fisher's exact test enrichment analysis.
-The main entry-points are:
+This module provides two complementary enrichment workflows:
 
 * :func:`run_ora`  — core function that accepts explicit ID sets.
 * :func:`run_group_ora` — convenience wrapper that extracts IDs from a
   :class:`~biastracker.dataset.BiasDataset` group column.
+* :func:`run_fgsea` — pre-ranked gene set enrichment analysis.
+* :func:`run_dataset_fgsea` — convenience wrapper that ranks a dataset column.
 """
 from __future__ import annotations
 
+import logging
 from typing import Literal, Set
 
 import numpy as np
 import pandas as pd
 from scipy import stats
+
+_logger = logging.getLogger(__name__)
 
 from biastracker.dataset import AnnotationSet, BiasDataset
 from biastracker.stats import adjust_pvalues
@@ -38,6 +42,21 @@ _ORA_COLS = [
 ]
 
 _GROUP_ORA_COLS = ["dataset", "group_col", "query_group"] + _ORA_COLS
+
+_FGSEA_COLS = [
+    "term_id",
+    "term_name",
+    "source",
+    "category",
+    "set_size",
+    "es",
+    "nes",
+    "p_value",
+    "fdr",
+    "leading_edge",
+]
+
+_DATASET_FGSEA_COLS = ["dataset", "score_col"] + _FGSEA_COLS
 
 
 # ---------------------------------------------------------------------------
@@ -270,3 +289,264 @@ def run_group_ora(
     result.insert(0, "dataset", dataset.name)
 
     return result[_GROUP_ORA_COLS].reset_index(drop=True)
+
+
+def _enrichment_score(
+    scores: np.ndarray,
+    hit_mask: np.ndarray,
+    weight: float = 1.0,
+) -> tuple[float, list[int]]:
+    """Compute the weighted pre-ranked enrichment score for one gene set."""
+    n_total = len(scores)
+    n_hits = int(hit_mask.sum())
+    if n_hits == 0:
+        raise ValueError("hit_mask contains no hits")
+    if n_hits == n_total:
+        raise ValueError("hit_mask contains all ranked IDs")
+
+    hit_weights = np.abs(scores) ** weight
+    hit_weights = np.where(hit_mask, hit_weights, 0.0)
+    weight_sum = hit_weights.sum()
+    if weight_sum == 0:
+        hit_weights = np.where(hit_mask, 1.0 / n_hits, 0.0)
+    else:
+        hit_weights = hit_weights / weight_sum
+
+    miss_step = 1.0 / (n_total - n_hits)
+    running = np.cumsum(np.where(hit_mask, hit_weights, -miss_step))
+    max_idx = int(np.argmax(running))
+    min_idx = int(np.argmin(running))
+    max_es = float(running[max_idx])
+    min_es = float(running[min_idx])
+
+    if abs(max_es) >= abs(min_es):
+        leading_edge = np.flatnonzero(hit_mask[: max_idx + 1]).tolist()
+        return max_es, leading_edge
+
+    leading_edge = np.flatnonzero(hit_mask[min_idx:]).tolist()
+    leading_edge = [idx + min_idx for idx in leading_edge]
+    return min_es, leading_edge
+
+
+def _normalise_fgsea_pvalue(
+    es: float,
+    null_es: np.ndarray,
+) -> tuple[float, float]:
+    """Return normalized ES and a same-tail permutation p-value."""
+    if es >= 0:
+        same_tail = null_es[null_es >= 0]
+        if len(same_tail) == 0:
+            same_tail = null_es
+        positive_tail = same_tail[same_tail > 0]
+        denom = np.mean(positive_tail) if len(positive_tail) else np.nan
+        nes = es / denom if not np.isnan(denom) else np.nan
+        p_value = (np.sum(same_tail >= es) + 1) / (len(same_tail) + 1)
+    else:
+        same_tail = null_es[null_es < 0]
+        if len(same_tail) == 0:
+            same_tail = null_es
+        negative_tail = same_tail[same_tail < 0]
+        denom = np.mean(np.abs(negative_tail)) if len(negative_tail) else np.nan
+        nes = es / denom if not np.isnan(denom) else np.nan
+        p_value = (np.sum(same_tail <= es) + 1) / (len(same_tail) + 1)
+    return float(nes), float(p_value)
+
+
+def run_fgsea(
+    ranked_scores: pd.Series,
+    annotations: AnnotationSet,
+    min_term_size: int = 3,
+    max_term_size: int | None = None,
+    n_permutations: int = 1000,
+    weight: float = 1.0,
+    seed: int | None = None,
+    correction: str = "fdr_bh",
+) -> pd.DataFrame:
+    """Run pre-ranked gene set enrichment analysis.
+
+    Parameters
+    ----------
+    ranked_scores:
+        Numeric scores indexed by entity identifier. Higher scores are treated
+        as the top of the ranked list. Missing scores and missing IDs are
+        removed. Duplicate IDs are resolved by keeping the first entry after
+        sorting by descending score.
+    annotations:
+        Annotation set containing term-to-ID mappings.
+    min_term_size:
+        Minimum number of ranked IDs annotated with a term.
+    max_term_size:
+        Optional maximum number of ranked IDs annotated with a term.
+    n_permutations:
+        Number of gene-label permutations used to estimate p-values and NES.
+    weight:
+        Exponent applied to absolute ranking scores in the running-sum statistic.
+        ``1.0`` matches the common weighted GSEA setting; ``0.0`` is unweighted.
+    seed:
+        Optional random seed for reproducible permutation results.
+    correction:
+        Multiple-testing correction method forwarded to
+        :func:`~biastracker.stats.adjust_pvalues`.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per tested term with enrichment score, normalized enrichment
+        score, permutation p-value, FDR, and leading-edge IDs.
+    """
+    if not isinstance(ranked_scores, pd.Series):
+        raise TypeError("ranked_scores must be a pandas Series indexed by ID")
+    if n_permutations < 1:
+        raise ValueError("n_permutations must be >= 1")
+    if min_term_size < 1:
+        raise ValueError("min_term_size must be >= 1")
+    if max_term_size is not None and max_term_size < min_term_size:
+        raise ValueError("max_term_size must be >= min_term_size")
+    if weight < 0:
+        raise ValueError("weight must be >= 0")
+
+    ranked = pd.DataFrame(
+        {
+            "primary_id": ranked_scores.index.astype(str),
+            "score": pd.to_numeric(ranked_scores, errors="coerce").to_numpy(),
+        }
+    ).dropna(subset=["score"])
+    # Drop NaN index entries that astype(str) converts to the literal "nan"
+    ranked = ranked[ranked["primary_id"] != "nan"]
+    # Infinite scores produce NaN enrichment statistics; exclude them
+    ranked = ranked[np.isfinite(ranked["score"])]
+    ranked = ranked.sort_values("score", ascending=False, kind="mergesort")
+    ranked = ranked.drop_duplicates(subset=["primary_id"], keep="first")
+
+    if len(ranked) < 2:
+        raise ValueError("ranked_scores must contain at least two valid IDs")
+
+    ranked_ids = ranked["primary_id"].to_numpy(dtype=str)
+    scores = ranked["score"].to_numpy(dtype=float)
+    id_to_pos = {identifier: i for i, identifier in enumerate(ranked_ids)}
+    ranked_id_set = set(ranked_ids)
+
+    rng = np.random.default_rng(seed)
+    null_cache: dict[int, np.ndarray] = {}
+
+    ann_df = annotations.table
+    id_col = annotations.id_col
+    term_col = annotations.term_col
+    term_id_col = annotations.term_id_col
+    cat_col = annotations.category_col
+    source = annotations.source
+
+    all_ann_ids = set(ann_df[id_col].astype(str))
+    if all_ann_ids:
+        overlap_frac = len(all_ann_ids & ranked_id_set) / len(all_ann_ids)
+        if overlap_frac < 0.1:
+            _logger.warning(
+                "Low identifier overlap: only %.1f%% of annotation IDs are present in "
+                "the ranked list. Check that identifier types match (e.g., UniProt "
+                "accession vs. gene symbol). Enrichment results may be unreliable.",
+                100 * overlap_frac,
+            )
+
+    rows: list[dict] = []
+    for term_name, term_df in ann_df.groupby(term_col, sort=False):
+        term_ids = set(term_df[id_col].astype(str)) & ranked_id_set
+        set_size = len(term_ids)
+        if set_size < min_term_size:
+            continue
+        if max_term_size is not None and set_size > max_term_size:
+            continue
+        if set_size >= len(ranked_ids):
+            continue
+
+        hit_mask = np.zeros(len(ranked_ids), dtype=bool)
+        hit_positions = [id_to_pos[identifier] for identifier in term_ids]
+        hit_mask[hit_positions] = True
+        es, leading_positions = _enrichment_score(scores, hit_mask, weight=weight)
+
+        if set_size not in null_cache:
+            null_scores = np.empty(n_permutations, dtype=float)
+            for i in range(n_permutations):
+                permuted_mask = np.zeros(len(ranked_ids), dtype=bool)
+                permuted_hits = rng.choice(len(ranked_ids), size=set_size, replace=False)
+                permuted_mask[permuted_hits] = True
+                null_scores[i], _ = _enrichment_score(scores, permuted_mask, weight=weight)
+            null_cache[set_size] = null_scores
+
+        nes, p_value = _normalise_fgsea_pvalue(es, null_cache[set_size])
+        term_id = term_df[term_id_col].iloc[0] if term_id_col in term_df.columns else term_name
+        category = term_df[cat_col].iloc[0] if cat_col in term_df.columns else "unknown"
+        leading_edge = ";".join(ranked_ids[pos] for pos in leading_positions)
+
+        rows.append(
+            {
+                "term_id": term_id,
+                "term_name": term_name,
+                "source": source,
+                "category": category,
+                "set_size": set_size,
+                "es": es,
+                "nes": nes,
+                "p_value": p_value,
+                "fdr": np.nan,
+                "leading_edge": leading_edge,
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame(columns=_FGSEA_COLS)
+
+    result = pd.DataFrame(rows)
+    result = adjust_pvalues(result, p_col="p_value", method=correction, out_col="fdr")
+    return result[_FGSEA_COLS].sort_values("fdr", ascending=True).reset_index(drop=True)
+
+
+def run_dataset_fgsea(
+    dataset: BiasDataset,
+    score_col: str,
+    annotations: AnnotationSet,
+    id_col: str = "primary_id",
+    min_term_size: int = 3,
+    max_term_size: int | None = None,
+    n_permutations: int = 1000,
+    weight: float = 1.0,
+    seed: int | None = None,
+    correction: str = "fdr_bh",
+) -> pd.DataFrame:
+    """Run pre-ranked GSEA using a numeric score column from a dataset."""
+    df = dataset.table
+    if id_col not in df.columns:
+        raise ValueError(
+            f"id_col '{id_col}' not found in dataset.table. "
+            f"Available columns: {list(df.columns)}"
+        )
+    if score_col not in df.columns:
+        raise ValueError(
+            f"score_col '{score_col}' not found in dataset.table. "
+            f"Available columns: {list(df.columns)}"
+        )
+
+    ranked_scores = pd.Series(
+        pd.to_numeric(df[score_col], errors="coerce").to_numpy(),
+        index=df[id_col].astype(str),
+        name=score_col,
+    )
+    result = run_fgsea(
+        ranked_scores=ranked_scores,
+        annotations=annotations,
+        min_term_size=min_term_size,
+        max_term_size=max_term_size,
+        n_permutations=n_permutations,
+        weight=weight,
+        seed=seed,
+        correction=correction,
+    )
+
+    if result.empty:
+        for col in ("dataset", "score_col"):
+            result[col] = pd.Series(dtype=str)
+        return result[_DATASET_FGSEA_COLS]
+
+    result = result.copy()
+    result.insert(0, "score_col", score_col)
+    result.insert(0, "dataset", dataset.name)
+    return result[_DATASET_FGSEA_COLS].reset_index(drop=True)

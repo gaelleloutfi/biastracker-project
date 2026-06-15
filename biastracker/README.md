@@ -113,3 +113,29 @@ To run the optional live PANTHER, HPA, and UniProt smoke tests:
 ```bash
 BIASTRACKER_RUN_NETWORK_TESTS=1 pytest tests/test_network_smoke.py
 ```
+
+## Pre-ranked fGSEA-style Enrichment
+
+BiasTracker also supports pre-ranked gene set enrichment for ranked protein
+scores. Use `analysis.fgsea` when every protein has a numeric ranking metric,
+such as log fold change, test statistic, abundance shift, or another continuous
+bias score.
+
+```yaml
+analysis:
+  fgsea:
+    - dataset: my_protein_dataset
+      annotation: panther_api
+      score_col: log2_fold_change
+      id_col: primary_id
+      min_term_size: 10
+      max_term_size: 500
+      n_permutations: 1000
+      weight: 1.0
+      seed: 1
+```
+
+The workflow writes `results/tables/fgsea__*.csv` with enrichment score (`es`),
+normalized enrichment score (`nes`), permutation `p_value`, `fdr`, and
+`leading_edge` proteins. It also writes `results/figures/fgsea_dotplot__*.png`
+when results are non-empty.
