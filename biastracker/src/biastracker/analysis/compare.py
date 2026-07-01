@@ -48,6 +48,9 @@ _MULTI_COLS = [
 # Extra column appended by compare_datasets on top of _COMPARE_COLS
 _DATASET_COMPARE_COLS = _COMPARE_COLS + ["comparison_type"]
 
+# Extra column appended by compare_multiple_datasets on top of _MULTI_COLS
+_MULTI_DATASET_COLS = _MULTI_COLS + ["comparison_type"]
+
 _DATASET_GROUP_COL = "__dataset_group"
 
 
@@ -340,3 +343,101 @@ def compare_datasets(
     result["comparison_type"] = "between_datasets"
 
     return result[_DATASET_COMPARE_COLS].reset_index(drop=True)
+
+
+def compare_multiple_datasets(
+    datasets: List[BiasDataset],
+    features: Optional[List[str]] = None,
+    correction: str = "fdr_bh",
+) -> pd.DataFrame:
+    """Kruskal-Wallis omnibus comparison across three or more datasets.
+
+    This is the many-dataset analogue of :func:`compare_datasets`. The datasets
+    are merged under a temporary grouping column and each numeric feature is
+    tested with a Kruskal-Wallis H-test (does *any* dataset differ?), delegating
+    to :func:`compare_multiple_groups`.
+
+    Parameters
+    ----------
+    datasets:
+        Two or more datasets to compare. Their ``.name`` attributes are used as
+        group labels and must all be distinct, and their ``.level`` must match.
+    features:
+        Numeric feature columns to test. ``None`` uses the curated BiasTracker
+        default feature list restricted to features present in **all** datasets.
+    correction:
+        Multiple-testing correction method (passed through to
+        :func:`~biastracker.stats.adjust_pvalues`).
+
+    Returns
+    -------
+    pd.DataFrame
+        Same schema as :func:`compare_multiple_groups` plus a ``comparison_type``
+        column set to ``"between_datasets"``.
+
+    Raises
+    ------
+    ValueError
+        If fewer than two datasets are given, names are not distinct, levels
+        differ, or no shared numeric features are found.
+    """
+    if len(datasets) < 2:
+        raise ValueError("compare_multiple_datasets requires at least two datasets.")
+
+    names = [d.name for d in datasets]
+    if len(set(names)) != len(names):
+        raise ValueError(
+            f"dataset names must be distinct so they can be used as group labels; got {names}."
+        )
+    levels = {d.level for d in datasets}
+    if len(levels) > 1:
+        raise ValueError(f"all datasets must share the same level; got {sorted(levels)}.")
+
+    # --- resolve the feature intersection across every dataset ---------------
+    resolved = [select_numeric_features(d.table, features=features) for d in datasets]
+    resolved_sets = [set(r) for r in resolved]
+    if features is None:
+        shared = [f for f in resolved[0] if all(f in s for s in resolved_sets[1:])]
+    else:
+        shared = [f for f in features if all(f in s for s in resolved_sets)]
+
+    if not shared:
+        raise ValueError(
+            "No shared numeric features found across the datasets. "
+            f"Per-dataset features: {[sorted(s) for s in resolved_sets]}."
+        )
+
+    # --- build combined table ------------------------------------------------
+    parts = []
+    for d in datasets:
+        t = d.table.copy()
+        t[_DATASET_GROUP_COL] = d.name
+        parts.append(t)
+    combined_df = pd.concat(parts, ignore_index=True)
+
+    level = datasets[0].level
+    if "level" not in combined_df.columns:
+        combined_df["level"] = level
+    if "sequence" not in combined_df.columns:
+        combined_df["sequence"] = ""
+
+    combined_dataset = BiasDataset(
+        name="_vs_".join(names),
+        table=combined_df,
+        level=level,
+        id_col=datasets[0].id_col,
+    )
+
+    # --- delegate to compare_multiple_groups ---------------------------------
+    result = compare_multiple_groups(
+        combined_dataset,
+        group_col=_DATASET_GROUP_COL,
+        features=shared,
+        correction=correction,
+    )
+
+    result = result.copy()
+    result["group_col"] = "dataset"
+    result["comparison_type"] = "between_datasets"
+
+    return result[_MULTI_DATASET_COLS].reset_index(drop=True)

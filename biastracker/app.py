@@ -205,6 +205,12 @@ def _sig_marker(fdr) -> str:
 def render_sidebar() -> dict:
     datasets: dict = {}
 
+    # Dynamic dataset slots — each slot has a stable unique id so that adding or
+    # removing one never reshuffles the widget keys of the others.
+    if "ds_slots" not in st.session_state:
+        st.session_state["ds_slots"]   = [1]
+        st.session_state["ds_next_id"] = 2
+
     with st.sidebar:
         logo_path = Path(__file__).parent / "assets" / "logo.png"
         if logo_path.exists():
@@ -224,9 +230,10 @@ def render_sidebar() -> dict:
             unsafe_allow_html=True,
         )
 
-        for slot in range(1, 4):
-            with st.expander(f"Dataset {slot}", expanded=(slot == 1)):
-                name = st.text_input("Name", value=f"Dataset {slot}", key=f"ds_name_{slot}")
+        slots = st.session_state["ds_slots"]
+        for pos, slot in enumerate(slots, start=1):
+            with st.expander(f"Dataset {pos}", expanded=(pos == len(slots))):
+                name = st.text_input("Name", value=f"Dataset {pos}", key=f"ds_name_{slot}")
                 type_label = st.selectbox("Type", list(_DS_TYPES), key=f"ds_type_{slot}")
                 ds_type = _DS_TYPES[type_label]
 
@@ -253,8 +260,23 @@ def render_sidebar() -> dict:
                     if err:
                         st.error(f"Error: {err[:300]}")
                     else:
+                        if name in datasets:
+                            st.warning(f"Name “{name}” already used — rename to avoid overwriting.")
                         datasets[name] = ds
                         st.success(f"✓ {len(ds.table):,} rows ({ds.level})")
+
+                if len(slots) > 1:
+                    if st.button("🗑  Remove", key=f"ds_remove_{slot}"):
+                        st.session_state["ds_slots"].remove(slot)
+                        for k in (f"ds_name_{slot}", f"ds_type_{slot}",
+                                  f"ds_level_{slot}", f"ds_file_{slot}"):
+                            st.session_state.pop(k, None)
+                        st.rerun()
+
+        if st.button("➕  Add dataset", use_container_width=True):
+            st.session_state["ds_slots"].append(st.session_state["ds_next_id"])
+            st.session_state["ds_next_id"] += 1
+            st.rerun()
 
         st.markdown(
             f'<p style="color:rgba(255,255,255,0.3);font-size:0.72rem;'
@@ -324,18 +346,31 @@ def tab_distributions(datasets: dict) -> None:
         st.warning("No numeric features found in the loaded datasets.")
         return
 
-    c1, c2, c3 = st.columns([3, 3, 1])
-    feat  = c1.selectbox("Property", all_feats, format_func=_lbl)
-    ptype = c2.radio("Plot type", ["Histogram", "Violin", "CDF"], horizontal=True)
-    rug   = c3.checkbox("Rug", value=False)
+    c1, c2, c3, c4 = st.columns([3, 3, 1, 1])
+    feat   = c1.selectbox("Property", all_feats, format_func=_lbl)
+    ptype  = c2.radio("Plot type", ["Histogram", "Violin", "CDF"], horizontal=True)
+    rug    = c3.checkbox("Rug", value=False)
+    logx   = c4.checkbox("Log₁₀", value=False, help="Log₁₀-transform values (drops ≤ 0)")
+
+    axis_lbl = f"log₁₀ {_lbl(feat)}" if logx else _lbl(feat)
+    n_dropped = 0
+
+    def _prep(values: np.ndarray) -> np.ndarray:
+        """Optionally log₁₀-transform, discarding non-positive values."""
+        nonlocal n_dropped
+        if not logx:
+            return values
+        pos = values[values > 0]
+        n_dropped += len(values) - len(pos)
+        return np.log10(pos)
 
     fig = go.Figure()
     fig.update_layout(
         template="plotly_white",
-        xaxis_title=_lbl(feat),
+        xaxis_title=axis_lbl,
         yaxis_title={
             "Histogram": "Count",
-            "Violin":    "",
+            "Violin":    axis_lbl,
             "CDF":       "Cumulative Probability",
         }[ptype],
         barmode="overlay",
@@ -348,8 +383,10 @@ def tab_distributions(datasets: dict) -> None:
     for i, (name, ds) in enumerate(datasets.items()):
         if feat not in ds.table.columns:
             continue
-        data  = ds.table[feat].dropna().values
+        data  = _prep(ds.table[feat].dropna().values)
         color = _COLORS[i % len(_COLORS)]
+        if len(data) == 0:
+            continue
 
         if ptype == "Histogram":
             fig.add_trace(go.Histogram(
@@ -381,6 +418,8 @@ def tab_distributions(datasets: dict) -> None:
             ))
 
     st.plotly_chart(fig, use_container_width=True)
+    if logx and n_dropped:
+        st.caption(f"Log₁₀ scale — {n_dropped:,} non-positive value(s) dropped.")
 
     # Side-by-side descriptive stats when multiple datasets loaded
     if len(datasets) > 1:
@@ -408,24 +447,43 @@ def tab_distributions(datasets: dict) -> None:
 
 def tab_compare(datasets: dict) -> None:
     if len(datasets) < 2:
-        st.info("Upload at least **two datasets** to run a pairwise comparison.")
+        st.info("Upload at least **two datasets** to run a comparison.")
         return
 
-    from biastracker.analysis.compare import compare_datasets
+    from biastracker.analysis.compare import compare_datasets, compare_multiple_datasets
 
-    names  = list(datasets.keys())
-    c1, c2 = st.columns(2)
-    name_a = c1.selectbox("Dataset A", names, index=0)
-    name_b = c2.selectbox("Dataset B", [n for n in names if n != name_a])
+    names = list(datasets.keys())
+    selected = st.multiselect(
+        "Datasets to compare",
+        names,
+        default=names,
+        help="Pick 2 for a pairwise test (Mann-Whitney U + KS), "
+             "or 3+ for an omnibus Kruskal-Wallis test across all of them.",
+    )
 
-    if st.button("▶  Run Comparison", type="primary"):
-        with st.spinner("Running Mann-Whitney U and KS tests with FDR correction…"):
+    if len(selected) < 2:
+        st.info("Select at least **two datasets**.")
+        return
+
+    mode     = "pairwise" if len(selected) == 2 else "multi"
+    test_lbl = ("Mann-Whitney U + KS" if mode == "pairwise"
+                else f"Kruskal-Wallis across {len(selected)} datasets")
+
+    if st.button(f"▶  Run Comparison  ·  {test_lbl}", type="primary"):
+        with st.spinner(f"Running {test_lbl} with FDR correction…"):
             try:
-                res = compare_datasets(datasets[name_a], datasets[name_b])
-                st.session_state["cmp_res"]   = res
-                st.session_state["cmp_label"] = f"{name_a} vs {name_b}"
-                st.session_state["cmp_a"]     = name_a
-                st.session_state["cmp_b"]     = name_b
+                if mode == "pairwise":
+                    a, b = selected
+                    res = compare_datasets(datasets[a], datasets[b])
+                    st.session_state["cmp_a"]     = a
+                    st.session_state["cmp_b"]     = b
+                    st.session_state["cmp_label"] = f"{a} vs {b}"
+                else:
+                    res = compare_multiple_datasets([datasets[n] for n in selected])
+                    st.session_state["cmp_label"] = " vs ".join(selected)
+                st.session_state["cmp_res"]  = res
+                st.session_state["cmp_mode"] = mode
+                st.session_state["cmp_sel"]  = selected
             except Exception as exc:
                 st.error(str(exc))
                 return
@@ -433,6 +491,13 @@ def tab_compare(datasets: dict) -> None:
     if "cmp_res" not in st.session_state:
         return
 
+    if st.session_state.get("cmp_mode") == "multi":
+        _render_multi_compare(datasets)
+    else:
+        _render_pairwise_compare(datasets)
+
+
+def _render_pairwise_compare(datasets: dict) -> None:
     res: pd.DataFrame = st.session_state["cmp_res"]
     cmp_a: str        = st.session_state.get("cmp_a", "A")
     cmp_b: str        = st.session_state.get("cmp_b", "B")
@@ -507,6 +572,114 @@ def tab_compare(datasets: dict) -> None:
         "⬇  Download comparison CSV",
         data=res.to_csv(index=False).encode(),
         file_name=f"comparison_{cmp_a}_vs_{cmp_b}.csv".replace(" ", "_"),
+        mime="text/csv",
+    )
+
+
+def _render_multi_compare(datasets: dict) -> None:
+    res: pd.DataFrame = st.session_state["cmp_res"]
+    label: str        = st.session_state["cmp_label"]
+    selected: list    = st.session_state.get("cmp_sel", list(datasets.keys()))
+
+    st.markdown(f'<div class="bt-section">Results — {label}</div>', unsafe_allow_html=True)
+    st.caption(
+        "Omnibus **Kruskal-Wallis** test per feature: does the distribution "
+        "differ across *any* of the selected datasets?"
+    )
+
+    # Features tested = intersection across all datasets. Flag any that were
+    # dropped because at least one selected dataset lacked them.
+    tested = set(res["feature"])
+    available: dict[str, set] = {}
+    for n in selected:
+        ds = datasets.get(n)
+        if ds is not None:
+            for f in _available_features(ds):
+                available.setdefault(f, set()).add(n)
+    dropped = {f: v for f, v in available.items() if f not in tested}
+    if dropped:
+        detail = "; ".join(
+            f"{_lbl(f)} (only in {', '.join(sorted(present))})"
+            for f, present in sorted(dropped.items())
+        )
+        st.warning(
+            f"{len(dropped)} feature(s) excluded — not present in every selected "
+            f"dataset: {detail}"
+        )
+
+    # ── Significance chart: −log₁₀ FDR per feature ───────────────────────────
+    pdf = res.copy()
+    pdf["feature_label"] = pdf["feature"].map(_lbl)
+    pdf["neglog_fdr"]    = -np.log10(pdf["kruskal_fdr"].clip(lower=1e-300))
+    pdf["sig"] = pdf["kruskal_fdr"].apply(
+        lambda x: "FDR < 0.05" if x < 0.05 else ("FDR < 0.1" if x < 0.1 else "n.s.")
+    )
+    pdf = pdf.sort_values("neglog_fdr")
+
+    sig_palette = {"FDR < 0.05": "#d32f2f", "FDR < 0.1": "#f57c00", "n.s.": "#BBBBBB"}
+    bfig = go.Figure()
+    for sig_level, color in sig_palette.items():
+        sub = pdf[pdf["sig"] == sig_level]
+        if sub.empty:
+            continue
+        bfig.add_trace(go.Bar(
+            x=sub["neglog_fdr"], y=sub["feature_label"],
+            orientation="h", name=sig_level,
+            marker_color=color, opacity=0.85,
+        ))
+    bfig.add_vline(
+        x=-np.log10(0.05), line_dash="dash", line_color=_NAVY, line_width=1.2,
+        annotation_text="FDR 0.05", annotation_position="top",
+    )
+    bfig.update_layout(
+        template="plotly_white",
+        xaxis_title="−log₁₀ FDR  (Kruskal-Wallis)",
+        barmode="overlay",
+        height=max(300, len(pdf) * 40 + 100),
+        legend_title="Significance",
+        margin=dict(l=160, r=20, t=30, b=50),
+        font=dict(color=_NAVY, size=12),
+    )
+    st.plotly_chart(bfig, use_container_width=True)
+
+    # ── Median of each feature per dataset (context for the omnibus test) ────
+    med_rows = []
+    for feat in res["feature"]:
+        row = {"Feature": _lbl(feat)}
+        for n in selected:
+            ds = datasets.get(n)
+            row[n] = (
+                round(float(ds.table[feat].dropna().median()), 4)
+                if ds is not None and feat in ds.table.columns
+                else np.nan
+            )
+        med_rows.append(row)
+    if med_rows:
+        st.markdown('<div class="bt-section">Median per Dataset</div>', unsafe_allow_html=True)
+        st.dataframe(pd.DataFrame(med_rows), use_container_width=True, hide_index=True)
+
+    # ── Kruskal-Wallis results table ─────────────────────────────────────────
+    keep = ["feature", "n_groups", "groups", "kruskal_statistic", "kruskal_p", "kruskal_fdr"]
+    disp = res[[c for c in keep if c in res.columns]].copy()
+    disp["sig"] = res["kruskal_fdr"].apply(_sig_marker)
+    disp = disp.rename(columns={
+        "feature":            "Feature",
+        "n_groups":           "N groups",
+        "groups":             "Groups",
+        "kruskal_statistic":  "KW H",
+        "kruskal_p":          "KW p",
+        "kruskal_fdr":        "KW FDR",
+        "sig":                "Sig",
+    })
+    fmt_cols = {c: "{:.4g}" for c in disp.columns if c in ("KW H", "KW p", "KW FDR")}
+    st.markdown('<div class="bt-section">Test Statistics</div>', unsafe_allow_html=True)
+    st.dataframe(disp.style.format(fmt_cols), use_container_width=True, hide_index=True)
+    st.caption("Sig: ** = FDR < 0.05,  * = FDR < 0.1")
+
+    st.download_button(
+        "⬇  Download comparison CSV",
+        data=res.to_csv(index=False).encode(),
+        file_name=f"comparison_{label.replace(' ', '_')}.csv",
         mime="text/csv",
     )
 
