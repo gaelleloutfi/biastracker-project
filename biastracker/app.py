@@ -1,0 +1,596 @@
+"""BiasTracker — Streamlit GUI
+
+Run from the biastracker/ directory:
+    streamlit run app.py
+"""
+from __future__ import annotations
+
+import tempfile
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
+
+# ── Page config (must be first Streamlit call) ────────────────────────────────
+st.set_page_config(
+    page_title="BiasTracker",
+    page_icon="🔬",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# ── Brand palette (from logo) ─────────────────────────────────────────────────
+_NAVY   = "#0E1F3D"
+_BLUE   = "#1565C0"
+_CYAN   = "#00B4D8"
+_COLORS = [_CYAN, "#FF6B6B", "#FFD93D", "#6BCB77", "#845EC2", "#F9A825"]
+
+# ── Feature registry ──────────────────────────────────────────────────────────
+_FEAT_META: dict[str, str] = {
+    "length":          "Sequence Length",
+    "mw":              "Molecular Weight (Da)",
+    "pi":              "Isoelectric Point (pI)",
+    "gravy":           "GRAVY Score",
+    "instability":     "Instability Index",
+    "aromaticity":     "Aromaticity",
+    "aliphatic_index": "Aliphatic Index",
+    "charge_at_pH":    "Net Charge at pH",
+    "trypsin_sites":   "Trypsin Sites",
+    "missed_cleavages":"Missed Cleavages",
+    "expression":      "Expression",
+    "PTR_AML":         "PTR (AML)",
+}
+
+_DS_TYPES: dict[str, str] = {
+    "DIA-NN Report (.parquet)":     "diann_report",
+    "MaxQuant evidence.txt":        "maxquant_evidence",
+    "MaxQuant proteinGroups.txt":   "maxquant_proteingroups",
+    "DIA-NN PG Matrix":             "diann_pg_matrix",
+    "Manual / Custom CSV":          "manual",
+    "Standard CSV (pre-processed)": "standard_csv",
+}
+
+# Level is fixed for tool-specific types; manual/standard let the user choose.
+_FIXED_LEVEL: dict[str, str] = {
+    "diann_report":           "peptide",
+    "maxquant_evidence":      "peptide",
+    "maxquant_proteingroups": "protein",
+    "diann_pg_matrix":        "protein",
+}
+
+_EXTENSIONS: dict[str, list[str]] = {
+    "diann_report":           ["parquet"],
+    "maxquant_evidence":      ["txt"],
+    "maxquant_proteingroups": ["txt"],
+    "diann_pg_matrix":        ["tsv", "txt", "csv"],
+    "manual":                 ["csv", "tsv", "txt"],
+    "standard_csv":           ["csv", "tsv", "txt"],
+}
+
+# ── Custom CSS ────────────────────────────────────────────────────────────────
+st.markdown(f"""
+<style>
+/* Sidebar gradient */
+[data-testid="stSidebar"] > div:first-child {{
+    background: linear-gradient(170deg, {_NAVY} 0%, {_BLUE} 100%);
+}}
+[data-testid="stSidebar"] .stMarkdown p,
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] .stSelectbox label,
+[data-testid="stSidebar"] .stTextInput label,
+[data-testid="stSidebar"] .stFileUploader label {{
+    color: rgba(255,255,255,0.9) !important;
+}}
+[data-testid="stSidebar"] .stExpander summary p {{
+    color: rgba(255,255,255,0.85) !important;
+    font-weight: 600;
+}}
+
+/* Metric cards */
+.bt-card {{
+    background: white;
+    border-left: 4px solid {_CYAN};
+    border-radius: 10px;
+    padding: 1rem 1.2rem;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.06);
+}}
+.bt-card .val {{
+    font-size: 1.9rem;
+    font-weight: 700;
+    color: {_NAVY};
+    line-height: 1.2;
+}}
+.bt-card .lbl {{
+    font-size: 0.82rem;
+    color: #666;
+    margin-top: 0.2rem;
+}}
+
+/* Section headers */
+.bt-section {{
+    border-bottom: 2px solid {_CYAN};
+    padding-bottom: 0.3rem;
+    margin: 1.2rem 0 0.8rem;
+    color: {_NAVY};
+    font-weight: 700;
+    font-size: 1.05rem;
+}}
+
+/* Tab accent */
+.stTabs [data-baseweb="tab-highlight"] {{ background-color: {_CYAN} !important; }}
+.stTabs [data-baseweb="tab"][aria-selected="true"] {{ color: {_CYAN} !important; }}
+</style>
+""", unsafe_allow_html=True)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Helpers
+# ═══════════════════════════════════════════════════════════════
+
+@st.cache_data(show_spinner=False)
+def _load(file_bytes: bytes, filename: str, ds_type: str, name: str, level: str):
+    """Load a dataset from raw bytes. Returns (BiasDataset | None, error | None)."""
+    suffix = Path(filename).suffix.lower()
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    try:
+        tmp.write(file_bytes)
+        tmp.flush()
+        tmp_path = tmp.name
+    finally:
+        tmp.close()
+
+    try:
+        from biastracker.dataset import (
+            load_diann_report,
+            load_diann_pg_matrix,
+            load_manual_table_via_protperties,
+            load_maxquant_evidence,
+            load_maxquant_proteingroups,
+            load_standard_table,
+        )
+        dispatch = {
+            "diann_report":           lambda p: load_diann_report(p, name=name),
+            "maxquant_evidence":      lambda p: load_maxquant_evidence(p, name=name),
+            "maxquant_proteingroups": lambda p: load_maxquant_proteingroups(p, name=name),
+            "diann_pg_matrix":        lambda p: load_diann_pg_matrix(p, name=name),
+            "manual":                 lambda p: load_manual_table_via_protperties(p, name=name, level=level),
+            "standard_csv":           lambda p: load_standard_table(p, name=name, level=level),
+        }
+        ds = dispatch[ds_type](tmp_path)
+        return ds, None
+    except Exception as exc:
+        return None, str(exc)
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
+def _available_features(ds) -> list[str]:
+    return [
+        f for f in _FEAT_META
+        if f in ds.table.columns and pd.api.types.is_numeric_dtype(ds.table[f])
+    ]
+
+
+def _lbl(feat: str) -> str:
+    return _FEAT_META.get(feat, feat)
+
+
+def _card_html(val: str, label: str) -> str:
+    return (
+        f'<div class="bt-card">'
+        f'<div class="val">{val}</div>'
+        f'<div class="lbl">{label}</div>'
+        f'</div>'
+    )
+
+
+def _sig_marker(fdr) -> str:
+    try:
+        v = float(fdr)
+        if v < 0.05:
+            return "**"
+        if v < 0.1:
+            return "*"
+    except Exception:
+        pass
+    return ""
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Sidebar — dataset loading
+# ═══════════════════════════════════════════════════════════════
+
+def render_sidebar() -> dict:
+    datasets: dict = {}
+
+    with st.sidebar:
+        logo_path = Path(__file__).parent / "assets" / "logo.png"
+        if logo_path.exists():
+            st.image(str(logo_path), use_container_width=True)
+        else:
+            st.markdown(
+                f'<div style="text-align:center;padding:1.2rem 0 1rem 0;">'
+                f'<span style="font-size:1.9rem;font-weight:800;color:white;">Bias</span>'
+                f'<span style="font-size:1.9rem;font-weight:800;color:{_CYAN};">Tracker</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+        st.markdown(
+            '<p style="color:rgba(255,255,255,0.55);font-size:0.78rem;'
+            'letter-spacing:0.08em;margin:0 0 0.5rem;">DATASETS</p>',
+            unsafe_allow_html=True,
+        )
+
+        for slot in range(1, 4):
+            with st.expander(f"Dataset {slot}", expanded=(slot == 1)):
+                name = st.text_input("Name", value=f"Dataset {slot}", key=f"ds_name_{slot}")
+                type_label = st.selectbox("Type", list(_DS_TYPES), key=f"ds_type_{slot}")
+                ds_type = _DS_TYPES[type_label]
+
+                if ds_type in _FIXED_LEVEL:
+                    level = _FIXED_LEVEL[ds_type]
+                else:
+                    level = st.selectbox("Level", ["peptide", "protein"], key=f"ds_level_{slot}")
+
+                uploaded = st.file_uploader(
+                    "Upload file",
+                    type=_EXTENSIONS.get(ds_type, []),
+                    key=f"ds_file_{slot}",
+                )
+
+                if uploaded is not None:
+                    with st.spinner("Loading…"):
+                        ds, err = _load(
+                            uploaded.getvalue(),
+                            uploaded.name,
+                            ds_type,
+                            name,
+                            level,
+                        )
+                    if err:
+                        st.error(f"Error: {err[:300]}")
+                    else:
+                        datasets[name] = ds
+                        st.success(f"✓ {len(ds.table):,} rows ({ds.level})")
+
+        st.markdown(
+            f'<p style="color:rgba(255,255,255,0.3);font-size:0.72rem;'
+            f'text-align:center;margin-top:1.5rem;">BiasTracker v0.1.0</p>',
+            unsafe_allow_html=True,
+        )
+
+    return datasets
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Tab: Overview
+# ═══════════════════════════════════════════════════════════════
+
+def tab_overview(datasets: dict) -> None:
+    if not datasets:
+        st.info("⬅ Upload at least one dataset from the sidebar to get started.")
+        return
+
+    from biastracker.analysis.summary import summarize_dataset
+
+    for name, ds in datasets.items():
+        st.markdown(f'<div class="bt-section">{name}</div>', unsafe_allow_html=True)
+
+        n_rows   = len(ds.table)
+        n_unique = ds.table[ds.id_col].nunique() if ds.id_col in ds.table.columns else "—"
+        n_seq    = int(
+            (ds.table["sequence"].notna() &
+             (ds.table["sequence"].astype(str).str.strip() != "")).sum()
+        )
+        n_feats  = len(_available_features(ds))
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.markdown(_card_html(f"{n_rows:,}", f"Rows ({ds.level})"), unsafe_allow_html=True)
+        c2.markdown(
+            _card_html(
+                f"{n_unique:,}" if isinstance(n_unique, int) else str(n_unique),
+                "Unique IDs",
+            ),
+            unsafe_allow_html=True,
+        )
+        c3.markdown(_card_html(f"{n_seq:,}", "With Sequence"), unsafe_allow_html=True)
+        c4.markdown(_card_html(str(n_feats), "Features Available"), unsafe_allow_html=True)
+
+        with st.expander("Feature summary table", expanded=False):
+            feats = _available_features(ds)
+            st.dataframe(
+                summarize_dataset(ds, features=feats),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        st.markdown("")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Tab: Distributions
+# ═══════════════════════════════════════════════════════════════
+
+def tab_distributions(datasets: dict) -> None:
+    if not datasets:
+        st.info("⬅ Upload at least one dataset from the sidebar.")
+        return
+
+    all_feats = sorted({f for ds in datasets.values() for f in _available_features(ds)})
+    if not all_feats:
+        st.warning("No numeric features found in the loaded datasets.")
+        return
+
+    c1, c2, c3 = st.columns([3, 3, 1])
+    feat  = c1.selectbox("Property", all_feats, format_func=_lbl)
+    ptype = c2.radio("Plot type", ["Histogram", "Violin", "CDF"], horizontal=True)
+    rug   = c3.checkbox("Rug", value=False)
+
+    fig = go.Figure()
+    fig.update_layout(
+        template="plotly_white",
+        xaxis_title=_lbl(feat),
+        yaxis_title={
+            "Histogram": "Count",
+            "Violin":    "",
+            "CDF":       "Cumulative Probability",
+        }[ptype],
+        barmode="overlay",
+        legend=dict(orientation="h", y=1.06, x=1, xanchor="right"),
+        height=460,
+        margin=dict(l=50, r=20, t=30, b=50),
+        font=dict(color=_NAVY, size=13),
+    )
+
+    for i, (name, ds) in enumerate(datasets.items()):
+        if feat not in ds.table.columns:
+            continue
+        data  = ds.table[feat].dropna().values
+        color = _COLORS[i % len(_COLORS)]
+
+        if ptype == "Histogram":
+            fig.add_trace(go.Histogram(
+                x=data, name=name,
+                opacity=0.65, marker_color=color, nbinsx=60,
+            ))
+        elif ptype == "Violin":
+            fig.add_trace(go.Violin(
+                y=data, name=name,
+                box_visible=True, meanline_visible=True,
+                fillcolor=color, opacity=0.7, line_color=color,
+            ))
+        else:  # CDF
+            sx = np.sort(data)
+            fig.add_trace(go.Scatter(
+                x=sx, y=np.arange(1, len(sx) + 1) / len(sx),
+                name=name, mode="lines",
+                line=dict(color=color, width=2.5),
+            ))
+
+        if rug and ptype != "Violin":
+            fig.add_trace(go.Scatter(
+                x=data,
+                y=np.full_like(data, -0.015 - 0.012 * i, dtype=float),
+                mode="markers",
+                marker=dict(symbol="line-ns-open", color=color, size=3, opacity=0.35),
+                showlegend=False,
+                hoverinfo="skip",
+            ))
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Side-by-side descriptive stats when multiple datasets loaded
+    if len(datasets) > 1:
+        rows = []
+        for name, ds in datasets.items():
+            if feat in ds.table.columns:
+                s = ds.table[feat].dropna()
+                rows.append({
+                    "Dataset": name,
+                    "N": int(s.count()),
+                    "Mean":   round(float(s.mean()), 4),
+                    "Median": round(float(s.median()), 4),
+                    "Std":    round(float(s.std()), 4),
+                    "Min":    round(float(s.min()), 4),
+                    "Max":    round(float(s.max()), 4),
+                })
+        if rows:
+            st.markdown('<div class="bt-section">Descriptive Statistics</div>', unsafe_allow_html=True)
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Tab: Compare
+# ═══════════════════════════════════════════════════════════════
+
+def tab_compare(datasets: dict) -> None:
+    if len(datasets) < 2:
+        st.info("Upload at least **two datasets** to run a pairwise comparison.")
+        return
+
+    from biastracker.analysis.compare import compare_datasets
+
+    names  = list(datasets.keys())
+    c1, c2 = st.columns(2)
+    name_a = c1.selectbox("Dataset A", names, index=0)
+    name_b = c2.selectbox("Dataset B", [n for n in names if n != name_a])
+
+    if st.button("▶  Run Comparison", type="primary"):
+        with st.spinner("Running Mann-Whitney U and KS tests with FDR correction…"):
+            try:
+                res = compare_datasets(datasets[name_a], datasets[name_b])
+                st.session_state["cmp_res"]   = res
+                st.session_state["cmp_label"] = f"{name_a} vs {name_b}"
+                st.session_state["cmp_a"]     = name_a
+                st.session_state["cmp_b"]     = name_b
+            except Exception as exc:
+                st.error(str(exc))
+                return
+
+    if "cmp_res" not in st.session_state:
+        return
+
+    res: pd.DataFrame = st.session_state["cmp_res"]
+    cmp_a: str        = st.session_state.get("cmp_a", "A")
+    cmp_b: str        = st.session_state.get("cmp_b", "B")
+    label: str        = st.session_state["cmp_label"]
+
+    st.markdown(f'<div class="bt-section">Results — {label}</div>', unsafe_allow_html=True)
+
+    # ── Waterfall chart: Δ median per feature ────────────────────────────────
+    pdf = res.copy()
+    pdf["feature_label"] = pdf["feature"].map(_lbl)
+    pdf["sig"] = pdf["mannwhitney_fdr"].apply(
+        lambda x: "FDR < 0.05" if x < 0.05 else ("FDR < 0.1" if x < 0.1 else "n.s.")
+    )
+    pdf = pdf.sort_values("delta_median")
+
+    sig_palette = {"FDR < 0.05": "#d32f2f", "FDR < 0.1": "#f57c00", "n.s.": "#BBBBBB"}
+    wfig = go.Figure()
+    for sig_level, color in sig_palette.items():
+        sub = pdf[pdf["sig"] == sig_level]
+        if sub.empty:
+            continue
+        wfig.add_trace(go.Bar(
+            x=sub["delta_median"], y=sub["feature_label"],
+            orientation="h", name=sig_level,
+            marker_color=color, opacity=0.85,
+        ))
+    wfig.add_vline(x=0, line_dash="dash", line_color=_NAVY, line_width=1.2)
+    wfig.update_layout(
+        template="plotly_white",
+        xaxis_title=f"Δ Median  ({cmp_a} − {cmp_b})",
+        barmode="overlay",
+        height=max(300, len(pdf) * 40 + 100),
+        legend_title="Significance",
+        margin=dict(l=160, r=20, t=30, b=50),
+        font=dict(color=_NAVY, size=12),
+    )
+    st.plotly_chart(wfig, use_container_width=True)
+
+    # ── Results table ─────────────────────────────────────────────────────────
+    keep = [
+        "feature", "n_a", "n_b",
+        "median_a", "median_b", "delta_median", "direction",
+        "mannwhitney_p", "mannwhitney_fdr", "ks_fdr",
+    ]
+    disp = res[[c for c in keep if c in res.columns]].copy()
+    disp["sig"] = res["mannwhitney_fdr"].apply(_sig_marker)
+    disp = disp.rename(columns={
+        "feature":           "Feature",
+        "n_a":               f"N ({cmp_a})",
+        "n_b":               f"N ({cmp_b})",
+        "median_a":          f"Median ({cmp_a})",
+        "median_b":          f"Median ({cmp_b})",
+        "delta_median":      "Δ Median",
+        "direction":         "Direction",
+        "mannwhitney_p":     "MW p",
+        "mannwhitney_fdr":   "MW FDR",
+        "ks_fdr":            "KS FDR",
+        "sig":               "Sig",
+    })
+    fmt_cols = {
+        c: "{:.4g}" for c in disp.columns
+        if any(k in c for k in ["Median", "Δ", "p", "FDR"])
+    }
+    st.dataframe(
+        disp.style.format(fmt_cols),
+        use_container_width=True,
+        hide_index=True,
+    )
+    st.caption("Sig: ** = FDR < 0.05,  * = FDR < 0.1")
+
+    st.download_button(
+        "⬇  Download comparison CSV",
+        data=res.to_csv(index=False).encode(),
+        file_name=f"comparison_{cmp_a}_vs_{cmp_b}.csv".replace(" ", "_"),
+        mime="text/csv",
+    )
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Tab: Export
+# ═══════════════════════════════════════════════════════════════
+
+def tab_export(datasets: dict) -> None:
+    if not datasets:
+        st.info("⬅ Upload at least one dataset from the sidebar.")
+        return
+
+    st.markdown('<div class="bt-section">Download Processed Tables</div>', unsafe_allow_html=True)
+    for name, ds in datasets.items():
+        st.download_button(
+            label=f"⬇  {name} — annotated table (.csv)",
+            data=ds.table.to_csv(index=False).encode(),
+            file_name=f"{name.replace(' ', '_')}_annotated.csv",
+            mime="text/csv",
+            key=f"dl_{name}",
+        )
+
+    if "cmp_res" in st.session_state:
+        st.markdown(
+            '<div class="bt-section" style="margin-top:1.5rem;">Comparison Results</div>',
+            unsafe_allow_html=True,
+        )
+        lbl = st.session_state.get("cmp_label", "comparison")
+        st.download_button(
+            label=f"⬇  {lbl} — statistics (.csv)",
+            data=st.session_state["cmp_res"].to_csv(index=False).encode(),
+            file_name=f"stats_{lbl.replace(' ', '_')}.csv",
+            mime="text/csv",
+            key="dl_cmp",
+        )
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Main
+# ═══════════════════════════════════════════════════════════════
+
+def main() -> None:
+    datasets = render_sidebar()
+
+    # ── Header ────────────────────────────────────────────────────────────────
+    logo_path = Path(__file__).parent / "assets" / "logo.png"
+    if logo_path.exists():
+        hc1, hc2 = st.columns([1, 9])
+        hc1.image(str(logo_path), width=85)
+        with hc2:
+            st.markdown(
+                f'<h1 style="margin:0;color:{_NAVY};">'
+                f'Bias<span style="color:{_CYAN};">Tracker</span></h1>'
+                f'<p style="margin:0;color:#666;font-size:0.9rem;">'
+                f'Physicochemical bias analysis for proteomics datasets</p>',
+                unsafe_allow_html=True,
+            )
+    else:
+        st.markdown(
+            f'<h1 style="color:{_NAVY};">'
+            f'Bias<span style="color:{_CYAN};">Tracker</span></h1>'
+            f'<p style="margin-top:-0.5rem;color:#666;">'
+            f'Physicochemical bias analysis for proteomics datasets</p>',
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("")
+
+    # ── Tabs ──────────────────────────────────────────────────────────────────
+    t1, t2, t3, t4 = st.tabs([
+        "🏠  Overview",
+        "📊  Distributions",
+        "⚖️  Compare",
+        "⬇  Export",
+    ])
+    with t1:
+        tab_overview(datasets)
+    with t2:
+        tab_distributions(datasets)
+    with t3:
+        tab_compare(datasets)
+    with t4:
+        tab_export(datasets)
+
+
+main()

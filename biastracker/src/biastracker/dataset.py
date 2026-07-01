@@ -248,6 +248,7 @@ def load_maxquant_proteingroups(path: str, name: str, **kwargs) -> BiasDataset:
 
     group_col = kwargs.pop("group_col", None)
     id_col = kwargs.pop("id_col", "primary_id")
+    kwargs.setdefault("fetch_sequences", True)
     df = from_maxquant_proteingroups(path, **kwargs)
     return BiasDataset(
         name=name,
@@ -268,6 +269,7 @@ def load_diann_pg_matrix(path: str, name: str, **kwargs) -> BiasDataset:
 
     group_col = kwargs.pop("group_col", None)
     id_col = kwargs.pop("id_col", "primary_id")
+    kwargs.setdefault("fetch_sequences", True)
     df = from_diann_pg_matrix(path, **kwargs)
     return BiasDataset(
         name=name,
