@@ -43,6 +43,10 @@ _FEAT_META: dict[str, str] = {
     "PTR_AML":         "PTR (AML)",
 }
 
+# Abundance / large-magnitude features whose raw units dwarf the per-residue
+# physicochemical features on a shared Δ axis — optionally hidden from charts.
+_INTENSITY_FEATS: set[str] = {"expression", "PTR_AML", "ext_reduced", "ext_cystine"}
+
 _DS_TYPES: dict[str, str] = {
     "DIA-NN Report (.parquet)":     "diann_report",
     "MaxQuant evidence.txt":        "maxquant_evidence",
@@ -196,6 +200,31 @@ def _sig_marker(fdr) -> str:
     except Exception:
         pass
     return ""
+
+
+def _standardized_delta(row, ds_a, ds_b) -> float:
+    """Δ median expressed in pooled-SD units (a standardized mean difference).
+
+    Dividing by the pooled within-group SD puts every feature on one common,
+    unit-free scale so the Δ waterfall isn't dominated by large-magnitude
+    features like intensity. Rough Cohen's-d guide: ~0.2 small, ~0.5 medium,
+    ~0.8 large.
+    """
+    if ds_a is None or ds_b is None:
+        return np.nan
+    feat = row["feature"]
+    if feat not in ds_a.table.columns or feat not in ds_b.table.columns:
+        return np.nan
+    a = ds_a.table[feat].dropna()
+    b = ds_b.table[feat].dropna()
+    n_a, n_b = len(a), len(b)
+    if n_a < 2 or n_b < 2:
+        return np.nan
+    s_a, s_b = float(a.std(ddof=1)), float(b.std(ddof=1))
+    pooled = np.sqrt(((n_a - 1) * s_a ** 2 + (n_b - 1) * s_b ** 2) / (n_a + n_b - 2))
+    if pooled == 0 or np.isnan(pooled):
+        return np.nan
+    return float(row["delta_median"]) / pooled
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -505,13 +534,40 @@ def _render_pairwise_compare(datasets: dict) -> None:
 
     st.markdown(f'<div class="bt-section">Results — {label}</div>', unsafe_allow_html=True)
 
-    # ── Waterfall chart: Δ median per feature ────────────────────────────────
+    # ── Chart controls ───────────────────────────────────────────────────────
+    cc1, cc2 = st.columns([2, 2])
+    scale = cc1.radio(
+        "Δ scale", ["Raw", "Standardized (effect size)"],
+        horizontal=True,
+        help="Raw shows Δ median in each feature's own units. Standardized "
+             "divides by the pooled SD so features are comparable (like Cohen's d).",
+    )
+    hide_int = cc2.checkbox(
+        "Hide intensity-type features", value=False,
+        help="Hide abundance / large-magnitude features (expression, extinction "
+             "coefficients, PTR) that otherwise dominate the raw axis.",
+    )
+    standardized = scale.startswith("Standardized")
+
+    # ── Waterfall chart: Δ per feature ───────────────────────────────────────
     pdf = res.copy()
+    if hide_int:
+        pdf = pdf[~pdf["feature"].isin(_INTENSITY_FEATS)]
+
+    if standardized:
+        ds_a, ds_b = datasets.get(cmp_a), datasets.get(cmp_b)
+        pdf["plot_val"] = pdf.apply(lambda r: _standardized_delta(r, ds_a, ds_b), axis=1)
+        pdf = pdf.dropna(subset=["plot_val"])
+        x_title = f"Standardized Δ  ({cmp_a} − {cmp_b}),  pooled-SD units"
+    else:
+        pdf["plot_val"] = pdf["delta_median"]
+        x_title = f"Δ Median  ({cmp_a} − {cmp_b})"
+
     pdf["feature_label"] = pdf["feature"].map(_lbl)
     pdf["sig"] = pdf["mannwhitney_fdr"].apply(
         lambda x: "FDR < 0.05" if x < 0.05 else ("FDR < 0.1" if x < 0.1 else "n.s.")
     )
-    pdf = pdf.sort_values("delta_median")
+    pdf = pdf.sort_values("plot_val")
 
     sig_palette = {"FDR < 0.05": "#d32f2f", "FDR < 0.1": "#f57c00", "n.s.": "#BBBBBB"}
     wfig = go.Figure()
@@ -520,14 +576,14 @@ def _render_pairwise_compare(datasets: dict) -> None:
         if sub.empty:
             continue
         wfig.add_trace(go.Bar(
-            x=sub["delta_median"], y=sub["feature_label"],
+            x=sub["plot_val"], y=sub["feature_label"],
             orientation="h", name=sig_level,
             marker_color=color, opacity=0.85,
         ))
     wfig.add_vline(x=0, line_dash="dash", line_color=_NAVY, line_width=1.2)
     wfig.update_layout(
         template="plotly_white",
-        xaxis_title=f"Δ Median  ({cmp_a} − {cmp_b})",
+        xaxis_title=x_title,
         barmode="overlay",
         height=max(300, len(pdf) * 40 + 100),
         legend_title="Significance",
@@ -535,6 +591,11 @@ def _render_pairwise_compare(datasets: dict) -> None:
         font=dict(color=_NAVY, size=12),
     )
     st.plotly_chart(wfig, use_container_width=True)
+    if standardized:
+        st.caption(
+            "Standardized Δ = (median A − median B) / pooled SD — comparable "
+            "across features. Rule of thumb: |Δ| ≈ 0.2 small, 0.5 medium, 0.8 large."
+        )
 
     # ── Results table ─────────────────────────────────────────────────────────
     keep = [
@@ -607,8 +668,15 @@ def _render_multi_compare(datasets: dict) -> None:
             f"dataset: {detail}"
         )
 
+    hide_int = st.checkbox(
+        "Hide intensity-type features", value=False, key="multi_hide_int",
+        help="Hide abundance / large-magnitude features (expression, extinction "
+             "coefficients, PTR) from the charts and tables below.",
+    )
+    res_v = res[~res["feature"].isin(_INTENSITY_FEATS)] if hide_int else res
+
     # ── Significance chart: −log₁₀ FDR per feature ───────────────────────────
-    pdf = res.copy()
+    pdf = res_v.copy()
     pdf["feature_label"] = pdf["feature"].map(_lbl)
     pdf["neglog_fdr"]    = -np.log10(pdf["kruskal_fdr"].clip(lower=1e-300))
     pdf["sig"] = pdf["kruskal_fdr"].apply(
@@ -644,7 +712,7 @@ def _render_multi_compare(datasets: dict) -> None:
 
     # ── Median of each feature per dataset (context for the omnibus test) ────
     med_rows = []
-    for feat in res["feature"]:
+    for feat in res_v["feature"]:
         row = {"Feature": _lbl(feat)}
         for n in selected:
             ds = datasets.get(n)
@@ -660,8 +728,8 @@ def _render_multi_compare(datasets: dict) -> None:
 
     # ── Kruskal-Wallis results table ─────────────────────────────────────────
     keep = ["feature", "n_groups", "groups", "kruskal_statistic", "kruskal_p", "kruskal_fdr"]
-    disp = res[[c for c in keep if c in res.columns]].copy()
-    disp["sig"] = res["kruskal_fdr"].apply(_sig_marker)
+    disp = res_v[[c for c in keep if c in res_v.columns]].copy()
+    disp["sig"] = res_v["kruskal_fdr"].apply(_sig_marker)
     disp = disp.rename(columns={
         "feature":            "Feature",
         "n_groups":           "N groups",
