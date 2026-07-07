@@ -134,8 +134,12 @@ st.markdown(f"""
 # ═══════════════════════════════════════════════════════════════
 
 @st.cache_data(show_spinner=False)
-def _load(file_bytes: bytes, filename: str, ds_type: str, name: str, level: str):
-    """Load a dataset from raw bytes. Returns (BiasDataset | None, error | None)."""
+def _load(file_bytes: bytes, filename: str, ds_type: str, name: str, level: str, ph: float = 8.5):
+    """Load a dataset from raw bytes. Returns (BiasDataset | None, error | None).
+
+    ``ph`` sets the pH at which ``charge_at_pH`` is computed; it is part of the
+    cache key so changing it re-computes the affected datasets.
+    """
     suffix = Path(filename).suffix.lower()
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     try:
@@ -155,11 +159,11 @@ def _load(file_bytes: bytes, filename: str, ds_type: str, name: str, level: str)
             load_standard_table,
         )
         dispatch = {
-            "diann_report":           lambda p: load_diann_report(p, name=name),
-            "maxquant_evidence":      lambda p: load_maxquant_evidence(p, name=name),
-            "maxquant_proteingroups": lambda p: load_maxquant_proteingroups(p, name=name),
-            "diann_pg_matrix":        lambda p: load_diann_pg_matrix(p, name=name),
-            "manual":                 lambda p: load_manual_table_via_protperties(p, name=name, level=level),
+            "diann_report":           lambda p: load_diann_report(p, name=name, ph=ph),
+            "maxquant_evidence":      lambda p: load_maxquant_evidence(p, name=name, ph=ph),
+            "maxquant_proteingroups": lambda p: load_maxquant_proteingroups(p, name=name, ph=ph),
+            "diann_pg_matrix":        lambda p: load_diann_pg_matrix(p, name=name, ph=ph),
+            "manual":                 lambda p: load_manual_table_via_protperties(p, name=name, level=level, ph=ph),
             "standard_csv":           lambda p: load_standard_table(p, name=name, level=level),
         }
         ds = dispatch[ds_type](tmp_path)
@@ -271,6 +275,15 @@ def render_sidebar() -> dict:
                 else:
                     level = st.selectbox("Level", ["peptide", "protein"], key=f"ds_level_{slot}")
 
+                ph = st.number_input(
+                    "Charge pH",
+                    min_value=0.0, max_value=14.0, value=8.5, step=0.1, format="%.2f",
+                    key=f"ds_ph_{slot}",
+                    help="pH at which net charge (charge_at_pH) is computed for this "
+                         "dataset — set it to the pH this analysis was run at "
+                         "(proteomics default 8.5). Changing it re-computes the dataset.",
+                )
+
                 uploaded = st.file_uploader(
                     "Upload file",
                     type=_EXTENSIONS.get(ds_type, []),
@@ -285,6 +298,7 @@ def render_sidebar() -> dict:
                             ds_type,
                             name,
                             level,
+                            ph,
                         )
                     if err:
                         st.error(f"Error: {err[:300]}")
@@ -298,7 +312,7 @@ def render_sidebar() -> dict:
                     if st.button("🗑  Remove", key=f"ds_remove_{slot}"):
                         st.session_state["ds_slots"].remove(slot)
                         for k in (f"ds_name_{slot}", f"ds_type_{slot}",
-                                  f"ds_level_{slot}", f"ds_file_{slot}"):
+                                  f"ds_level_{slot}", f"ds_ph_{slot}", f"ds_file_{slot}"):
                             st.session_state.pop(k, None)
                         st.rerun()
 

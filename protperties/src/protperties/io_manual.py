@@ -31,6 +31,7 @@ from ._compute_utils import compute_props_on_series
 def _compute_props_on_series(
     seq: pd.Series,
     include_missed_cleavages: bool = False,
+    ph: float = 8.5,
 ) -> pd.DataFrame:
     """
     Compute physicochemical properties for each sequence in a Series.
@@ -50,7 +51,7 @@ def _compute_props_on_series(
     pandas.DataFrame
         One row per sequence with computed property columns.
     """
-    return compute_props_on_series(seq, include_missed_cleavages=include_missed_cleavages)
+    return compute_props_on_series(seq, include_missed_cleavages=include_missed_cleavages, ph=ph)
 
 
 def from_manual_table(
@@ -70,6 +71,7 @@ def from_manual_table(
         "Precursor.Normalised",
     ),
     fill_expression: float = 0.0,
+    ph: float = 8.5,
 ) -> pd.DataFrame:
     """
     Load an arbitrary CSV/TSV table with sequence and expression data.
@@ -152,6 +154,7 @@ def from_manual_table(
     props_df = _compute_props_on_series(
         df["sequence"],
         include_missed_cleavages=(level == "peptide"),
+        ph=ph,
     )
     df = pd.concat(
         [df.reset_index(drop=True), props_df.reset_index(drop=True)],

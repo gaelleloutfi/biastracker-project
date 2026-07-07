@@ -16,6 +16,7 @@ from .features_digest import missed_cleavages_in_peptide as mc_pep
 def compute_props_on_series(
     seq: pd.Series,
     include_missed_cleavages: bool = True,
+    ph: float = 8.5,
 ) -> pd.DataFrame:
     """
     Compute physicochemical properties for each sequence in a Series.
@@ -32,6 +33,8 @@ def compute_props_on_series(
         Series of amino-acid sequences.
     include_missed_cleavages : bool, default True
         When True, also compute and include ``missed_cleavages``.
+    ph : float, default 8.5
+        pH at which ``charge_at_pH`` is evaluated.
 
     Returns
     -------
@@ -45,7 +48,7 @@ def compute_props_on_series(
     seq = seq.astype(str)
     records = []
     for s in seq:
-        rec = basic_props(s)
+        rec = basic_props(s, ph=ph)
         if include_missed_cleavages:
             rec["missed_cleavages"] = mc_pep(s)
         records.append(rec)

@@ -127,7 +127,7 @@ def _apply_mq_filters(df: pd.DataFrame, cfg: MaxQuantFilterConfig) -> pd.DataFra
 
     return df.loc[mask].reset_index(drop=True)
 
-def _compute_props_on_series(seq: pd.Series) -> pd.DataFrame:
+def _compute_props_on_series(seq: pd.Series, ph: float = 8.5) -> pd.DataFrame:
     """
     Compute physicochemical properties and digestion properties for each peptide sequence in a Series.
     
@@ -144,12 +144,13 @@ def _compute_props_on_series(seq: pd.Series) -> pd.DataFrame:
     pandas.DataFrame
         one row per peptide sequence with computed properties.
     """
-    return compute_props_on_series(seq, include_missed_cleavages=True)
+    return compute_props_on_series(seq, include_missed_cleavages=True, ph=ph)
 
 def from_maxquant_evidence(
-        path: str | Path, 
+        path: str | Path,
         filters: Optional[MaxQuantFilterConfig] = None,
         keep_cols: Optional[Iterable[str]] = None,
+        ph: float = 8.5,
         )-> pd.DataFrame:
     """
     Load a MaxQuant evidence.txt, filter low confidence entries, map to DIANN-like
@@ -254,7 +255,7 @@ def from_maxquant_evidence(
         df["protein_primary_id"] = df["Protein.Ids"].apply(normalize_uniprot_accession)
     
     # Compute physicochemical properties on the peptide sequences.
-    props_df = _compute_props_on_series(df["Stripped.Sequence"])
+    props_df = _compute_props_on_series(df["Stripped.Sequence"], ph=ph)
     out = pd.concat(
         [df.reset_index(drop=True), props_df.reset_index(drop=True)],
         axis=1,

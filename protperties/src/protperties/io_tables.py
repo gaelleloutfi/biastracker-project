@@ -199,7 +199,7 @@ def _apply_filters(df: pd.DataFrame, cfg: FilterConfig):
 
     return df.loc[mask].reset_index(drop=True)
 
-def _compute_props_on_series(seq: pd.Series) -> pd.DataFrame:
+def _compute_props_on_series(seq: pd.Series, ph: float = 8.5) -> pd.DataFrame:
     """
     Compute physicochemical and digestion properties for each peptide sequence in a Series.
     
@@ -216,7 +216,7 @@ def _compute_props_on_series(seq: pd.Series) -> pd.DataFrame:
     pandas.DataFrame
         One row per peptide sequence with computed properties.
     """
-    return compute_props_on_series(seq, include_missed_cleavages=True)
+    return compute_props_on_series(seq, include_missed_cleavages=True, ph=ph)
 
 
 def _deduplicate(df: pd.DataFrame, cfg: DedupConfig) -> pd.DataFrame:
@@ -276,6 +276,7 @@ def from_diann_parquet(
     dedup: Optional[DedupConfig] = None,
     keep_cols: Optional[Iterable[str]] = None,
     seq_col: str = "Stripped.Sequence",
+    ph: float = 8.5,
 ) -> pd.DataFrame:
     """
     Load a DIA-NN main report (.parquet), filter low-confidence precursors,
@@ -346,7 +347,7 @@ def from_diann_parquet(
         df["protein_group_primary_id"] = df["Protein.Group"].apply(normalize_uniprot_accession)
     
     # Compute properties on peptide sequences
-    props_df = _compute_props_on_series(df[seq_col])
+    props_df = _compute_props_on_series(df[seq_col], ph=ph)
     out = pd.concat(
         [df.reset_index(drop=True), props_df.reset_index(drop=True)],
         axis=1,
