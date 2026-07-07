@@ -174,6 +174,98 @@ def _load(file_bytes: bytes, filename: str, ds_type: str, name: str, level: str,
         Path(tmp_path).unlink(missing_ok=True)
 
 
+@st.cache_data(show_spinner=False)
+def _load_annotations(
+    file_bytes: bytes,
+    filename: str,
+    fmt: str,
+    id_col: str,
+    term_col: str,
+    term_id_col: str,
+    category_col: str,
+):
+    """Load an annotation file into an AnnotationSet. Returns (ann | None, err | None)."""
+    suffix = Path(filename).suffix.lower()
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    try:
+        tmp.write(file_bytes)
+        tmp.flush()
+        tmp_path = tmp.name
+    finally:
+        tmp.close()
+
+    try:
+        from biastracker.annotations.custom import load_gmt, load_long_annotation_table
+        stem = Path(filename).stem
+        if fmt == "GMT":
+            ann = load_gmt(tmp_path, name=stem)
+        else:
+            ann = load_long_annotation_table(
+                tmp_path,
+                name=stem,
+                id_col=id_col or "primary_id",
+                term_col=term_col or "term_name",
+                term_id_col=term_id_col or None,
+                category_col=category_col or None,
+            )
+        return ann, None
+    except Exception as exc:
+        return None, str(exc)
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
+# Bundled annotation sets: label -> (path relative to app.py, source tag). All
+# are long-format, UniProt-keyed, with primary_id/term_name/term_id/category.
+_BUILTIN_ANNOTATIONS: dict[str, tuple[str, str]] = {
+    "Contaminants DB": ("data/raw/contaminants/contaminants_long.csv", "contaminants"),
+    "HPA subcellular location": ("data/raw/hpa/subcellular_location_long_uniprot.csv", "HPA"),
+}
+
+
+_HUMAN_PROTEOME_LABEL = "Whole human proteome (UniProt Swiss-Prot, live)"
+_UNIPROT_HUMAN_QUERY = (
+    "https://rest.uniprot.org/uniprotkb/stream"
+    "?query=reviewed:true+AND+organism_id:9606&fields=accession&format=list"
+)
+
+
+def _fetch_human_proteome_ids() -> set[str]:
+    """Fetch the reviewed human proteome accessions live from the UniProt API.
+
+    Queried fresh on each ORA run so the background is always current. Raises on
+    network/HTTP errors so the caller can surface a message instead of silently
+    using a stale set.
+    """
+    import gzip
+    import urllib.request
+
+    req = urllib.request.Request(_UNIPROT_HUMAN_QUERY, headers={"User-Agent": "BiasTracker/0.1"})
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        raw = resp.read()
+    if raw[:2] == b"\x1f\x8b":          # gzip magic bytes
+        raw = gzip.decompress(raw)
+    return {ln.strip() for ln in raw.decode("utf-8", "replace").splitlines() if ln.strip()}
+
+
+@st.cache_data(show_spinner=False)
+def _load_builtin_annotation(rel_path: str, source: str):
+    """Load a bundled long-format annotation set. Returns (ann | None, err | None)."""
+    path = Path(__file__).parent / rel_path
+    if not path.exists():
+        return None, f"Built-in annotation file not found: {path}"
+    try:
+        from biastracker.annotations.custom import load_long_annotation_table
+        ann = load_long_annotation_table(
+            str(path), name=source, source=source,
+            id_col="primary_id", term_col="term_name",
+            term_id_col="term_id", category_col="category",
+        )
+        return ann, None
+    except Exception as exc:
+        return None, str(exc)
+
+
 def _available_features(ds) -> list[str]:
     return [
         f for f in _FEAT_META
@@ -767,6 +859,268 @@ def _render_multi_compare(datasets: dict) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════
+#  Tab: Enrichment (ORA + fgsea)
+# ═══════════════════════════════════════════════════════════════
+
+def _trunc(s: str, n: int = 45) -> str:
+    s = str(s)
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def _enrichment_bar(pdf: pd.DataFrame, x_col: str, x_title: str, pos_label: str,
+                    neg_label: str, top_n: int = 20) -> None:
+    """Horizontal bar of the top terms, coloured by direction (pos/neg of x_col)."""
+    sub = pdf.reindex(pdf[x_col].abs().sort_values(ascending=False).index).head(top_n)
+    sub = sub.sort_values(x_col)
+    colors = [_CYAN if v >= 0 else "#FF6B6B" for v in sub[x_col]]
+    fig = go.Figure(go.Bar(
+        x=sub[x_col], y=[_trunc(t) for t in sub["term_name"]],
+        orientation="h", marker_color=colors, opacity=0.85,
+    ))
+    fig.add_vline(x=0, line_dash="dash", line_color=_NAVY, line_width=1.2)
+    fig.update_layout(
+        template="plotly_white",
+        xaxis_title=x_title,
+        height=max(300, len(sub) * 30 + 120),
+        margin=dict(l=260, r=20, t=30, b=50),
+        font=dict(color=_NAVY, size=12),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption(f"Teal = {pos_label}, red = {neg_label}. Showing top {len(sub)} terms.")
+
+
+def _run_ora_ui(datasets: dict, annotations) -> None:
+    from biastracker.analysis.enrichment import run_ora
+
+    names = list(datasets.keys())
+    bg_options = ["All loaded datasets (union)", _HUMAN_PROTEOME_LABEL] + names
+    c1, c2, c3 = st.columns(3)
+    query_name = c1.selectbox("Query dataset", names, key="ora_query",
+                              help="Proteins in this dataset form the query set.")
+    bg_choice  = c2.selectbox("Background universe", bg_options,
+                              key="ora_bg",
+                              help="The reference set the query is tested against. The whole "
+                                   "human proteome tests vs all human proteins (classic ORA); "
+                                   "the dataset options isolate method/detection bias.")
+    min_term   = c3.number_input("Min term size", 1, 500, 3, key="ora_min")
+
+    if st.button("▶  Run ORA", type="primary", key="ora_run"):
+        qds = datasets[query_name]
+        query_ids = set(qds.table[qds.id_col].dropna().astype(str))
+        if bg_choice.startswith("All"):
+            background_ids: set[str] = set()
+            for ds in datasets.values():
+                background_ids |= set(ds.table[ds.id_col].dropna().astype(str))
+        elif bg_choice == _HUMAN_PROTEOME_LABEL:
+            try:
+                with st.spinner("Fetching current human proteome from UniProt…"):
+                    background_ids = _fetch_human_proteome_ids()
+            except Exception as exc:
+                st.error(f"Could not fetch human proteome from UniProt: {str(exc)[:200]}")
+                return
+            if not background_ids:
+                st.error("UniProt returned no accessions for the human proteome query.")
+                return
+            # Query IDs outside the proteome (e.g. non-human contaminants) are
+            # dropped by run_ora; keep the universe = proteome ∪ query so those
+            # do not silently shrink the background.
+            background_ids = background_ids | query_ids
+        else:
+            bds = datasets[bg_choice]
+            background_ids = set(bds.table[bds.id_col].dropna().astype(str)) | query_ids
+
+        if query_ids == background_ids:
+            st.warning("Query and background sets are identical — ORA needs a larger "
+                       "background than the query. Pick a different background.")
+            return
+        with st.spinner("Running Fisher's exact tests with FDR correction…"):
+            try:
+                res = run_ora(query_ids, background_ids, annotations, min_term_size=int(min_term))
+            except Exception as exc:
+                st.error(str(exc))
+                return
+        st.session_state["ora_res"]   = res
+        st.session_state["ora_label"] = f"{query_name} vs {bg_choice}"
+
+    if "ora_res" not in st.session_state:
+        return
+    res: pd.DataFrame = st.session_state["ora_res"]
+    label = st.session_state.get("ora_label", "ORA")
+    st.markdown(f'<div class="bt-section">ORA — {label}</div>', unsafe_allow_html=True)
+    if res.empty:
+        st.warning("No terms passed the size threshold. Check that annotation IDs match "
+                   "your dataset IDs (e.g. UniProt accessions).")
+        return
+
+    n_sig = int((res["fdr"] < 0.05).sum())
+    st.caption(f"{len(res):,} terms tested · {n_sig:,} significant at FDR < 0.05")
+
+    plot = res.copy()
+    plot["signed_score"] = -np.log10(plot["fdr"].clip(lower=1e-300)) * np.where(
+        plot["direction"] == "depleted", -1, 1)
+    _enrichment_bar(plot, "signed_score", "−log₁₀ FDR  (signed by direction)",
+                    pos_label="enriched", neg_label="depleted")
+
+    disp = res.rename(columns={
+        "term_name": "Term", "category": "Category", "query_count": "Query hits",
+        "background_count": "BG hits", "odds_ratio": "Odds ratio",
+        "p_value": "p", "fdr": "FDR", "direction": "Direction",
+    })
+    keep = ["Term", "Category", "Query hits", "BG hits", "Odds ratio", "p", "FDR", "Direction"]
+    disp = disp[[c for c in keep if c in disp.columns]]
+    st.dataframe(
+        disp.style.format({c: "{:.4g}" for c in ("Odds ratio", "p", "FDR")}),
+        use_container_width=True, hide_index=True,
+    )
+    st.download_button(
+        "⬇  Download ORA results CSV",
+        data=res.to_csv(index=False).encode(),
+        file_name=f"ora_{label.replace(' ', '_')}.csv",
+        mime="text/csv", key="ora_dl",
+    )
+
+
+def _run_fgsea_ui(datasets: dict, annotations) -> None:
+    from biastracker.analysis.enrichment import run_dataset_fgsea
+
+    names = list(datasets.keys())
+    c1, c2 = st.columns(2)
+    ds_name = c1.selectbox("Dataset", names, key="gsea_ds")
+    ds = datasets[ds_name]
+    numeric_cols = [c for c in ds.table.columns if pd.api.types.is_numeric_dtype(ds.table[c])]
+    if not numeric_cols:
+        st.warning("This dataset has no numeric column to rank by.")
+        return
+    score_col = c2.selectbox("Rank by (score column)", numeric_cols, key="gsea_score",
+                             format_func=lambda c: _FEAT_META.get(c, c))
+
+    a1, a2, a3, a4 = st.columns(4)
+    min_term = a1.number_input("Min term size", 1, 500, 5, key="gsea_min")
+    max_term = a2.number_input("Max term size (0 = none)", 0, 5000, 500, key="gsea_max")
+    n_perm   = a3.number_input("Permutations", 100, 10000, 1000, step=100, key="gsea_perm")
+    weight   = a4.number_input("Weight", 0.0, 2.0, 1.0, step=0.5, key="gsea_weight")
+
+    if st.button("▶  Run fgsea", type="primary", key="gsea_run"):
+        with st.spinner(f"Ranking by {score_col} · {int(n_perm)} permutations…"):
+            try:
+                res = run_dataset_fgsea(
+                    ds, score_col=score_col, annotations=annotations, id_col=ds.id_col,
+                    min_term_size=int(min_term), max_term_size=(int(max_term) or None),
+                    n_permutations=int(n_perm), weight=float(weight), seed=0,
+                )
+            except Exception as exc:
+                st.error(str(exc))
+                return
+        st.session_state["gsea_res"]   = res
+        st.session_state["gsea_label"] = f"{ds_name} ranked by {score_col}"
+
+    if "gsea_res" not in st.session_state:
+        return
+    res: pd.DataFrame = st.session_state["gsea_res"]
+    label = st.session_state.get("gsea_label", "fgsea")
+    st.markdown(f'<div class="bt-section">fgsea — {label}</div>', unsafe_allow_html=True)
+    if res.empty:
+        st.warning("No terms passed the size thresholds / ID overlap. Check that "
+                   "annotation IDs match your dataset IDs.")
+        return
+
+    n_sig = int((res["fdr"] < 0.05).sum())
+    st.caption(f"{len(res):,} gene sets tested · {n_sig:,} significant at FDR < 0.05")
+
+    _enrichment_bar(res.copy(), "nes", "Normalized Enrichment Score (NES)",
+                    pos_label="high-score end", neg_label="low-score end")
+
+    disp = res.rename(columns={
+        "term_name": "Term", "category": "Category", "set_size": "Set size",
+        "es": "ES", "nes": "NES", "p_value": "p", "fdr": "FDR",
+    })
+    keep = ["Term", "Category", "Set size", "ES", "NES", "p", "FDR"]
+    disp = disp[[c for c in keep if c in disp.columns]]
+    st.dataframe(
+        disp.style.format({c: "{:.4g}" for c in ("ES", "NES", "p", "FDR")}),
+        use_container_width=True, hide_index=True,
+    )
+    st.download_button(
+        "⬇  Download fgsea results CSV",
+        data=res.to_csv(index=False).encode(),
+        file_name=f"fgsea_{label.replace(' ', '_')}.csv",
+        mime="text/csv", key="gsea_dl",
+    )
+
+
+def tab_enrichment(datasets: dict) -> None:
+    st.markdown('<div class="bt-section">Functional Enrichment</div>', unsafe_allow_html=True)
+    if not datasets:
+        st.info("⬅ Upload at least one dataset from the sidebar.")
+        return
+
+    st.markdown("**1 · Choose an annotation / gene-set**")
+    source = st.radio(
+        "Annotation source",
+        ["Built-in", "Upload file"],
+        horizontal=True,
+        help="Built-in: bundled UniProt-keyed sets (Contaminants DB, HPA "
+             "subcellular location). Upload: your own GMT or long table.",
+    )
+
+    if source == "Built-in":
+        choice = st.selectbox("Built-in set", list(_BUILTIN_ANNOTATIONS), key="builtin_ann")
+        rel_path, src_tag = _BUILTIN_ANNOTATIONS[choice]
+        ann, err = _load_builtin_annotation(rel_path, src_tag)
+        if err:
+            st.error(f"Could not load '{choice}': {err[:300]}")
+            return
+    else:
+        ac1, ac2 = st.columns([1, 2])
+        fmt_label = ac1.radio(
+            "Format", ["GMT", "Long table (CSV/TSV)"],
+            help="GMT: one gene set per line (term, description, IDs…). "
+                 "Long table: rows of ID↔term pairs.",
+        )
+        fmt = "GMT" if fmt_label == "GMT" else "long"
+        ann_file = ac2.file_uploader(
+            "Annotation file", type=["gmt", "csv", "tsv", "txt"], key="ann_file",
+        )
+
+        id_col = term_col = term_id_col = category_col = ""
+        if fmt == "long":
+            lc1, lc2, lc3, lc4 = st.columns(4)
+            id_col       = lc1.text_input("ID column", value="primary_id")
+            term_col     = lc2.text_input("Term-name column", value="term_name")
+            term_id_col  = lc3.text_input("Term-ID column (opt.)", value="")
+            category_col = lc4.text_input("Category column (opt.)", value="")
+
+        if ann_file is None:
+            st.caption("Upload an annotation file to enable ORA and fgsea. IDs must match "
+                       "your dataset IDs (e.g. UniProt accessions).")
+            return
+
+        ann, err = _load_annotations(
+            ann_file.getvalue(), ann_file.name, fmt,
+            id_col, term_col, term_id_col, category_col,
+        )
+        if err:
+            st.error(f"Annotation load error: {err[:300]}")
+            return
+    n_terms = ann.table[ann.term_col].nunique()
+    n_ids   = ann.table[ann.id_col].nunique()
+    st.success(f"✓ {n_terms:,} terms · {n_ids:,} unique IDs")
+
+    st.markdown("**2 · Choose analysis**")
+    method = st.radio(
+        "Method", ["ORA (over-representation)", "fgsea (pre-ranked GSEA)"],
+        horizontal=True,
+        help="ORA: is a term over-represented in one dataset's proteins vs a background "
+             "(Fisher's exact). fgsea: is a term concentrated at the top/bottom of a "
+             "dataset ranked by a score (pre-ranked GSEA).",
+    )
+    if method.startswith("ORA"):
+        _run_ora_ui(datasets, ann)
+    else:
+        _run_fgsea_ui(datasets, ann)
+
+
+# ═══════════════════════════════════════════════════════════════
 #  Tab: Export
 # ═══════════════════════════════════════════════════════════════
 
@@ -832,10 +1186,11 @@ def main() -> None:
     st.markdown("")
 
     # ── Tabs ──────────────────────────────────────────────────────────────────
-    t1, t2, t3, t4 = st.tabs([
+    t1, t2, t3, t4, t5 = st.tabs([
         "🏠  Overview",
         "📊  Distributions",
         "⚖️  Compare",
+        "🧬  Enrichment",
         "⬇  Export",
     ])
     with t1:
@@ -845,6 +1200,8 @@ def main() -> None:
     with t3:
         tab_compare(datasets)
     with t4:
+        tab_enrichment(datasets)
+    with t5:
         tab_export(datasets)
 
 
