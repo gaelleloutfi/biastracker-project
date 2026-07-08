@@ -5,8 +5,18 @@ Run from the biastracker/ directory:
 """
 from __future__ import annotations
 
+import sys
 import tempfile
 from pathlib import Path
+
+# Make the in-repo packages importable on hosts that install only PyPI deps
+# (e.g. Streamlit Community Cloud installs from requirements.txt, not the local
+# `biastracker`/`protperties` packages). Adding their src/ dirs to the path lets
+# `import biastracker` / `import protperties` work without a pip install.
+_APP_DIR = Path(__file__).resolve().parent
+for _src in (_APP_DIR / "src", _APP_DIR.parent / "protperties" / "src"):
+    if _src.is_dir() and str(_src) not in sys.path:
+        sys.path.insert(0, str(_src))
 
 import numpy as np
 import pandas as pd

@@ -23,8 +23,10 @@ Otherwise **A** is the easier, always-on choice for a small team.
 ## Prerequisites (both options)
 
 1. Push this repo to GitHub (a **private** repo is fine and recommended).
-2. The root [`requirements.txt`](requirements.txt) installs both local packages
-   (`protperties` is not on PyPI, so it is installed from its path).
+2. [`biastracker/requirements.txt`](biastracker/requirements.txt) (next to `app.py`)
+   lists the PyPI dependencies. The in-repo `biastracker`/`protperties` packages are
+   imported from source via a `sys.path` shim at the top of `app.py`, so they don't
+   need to be pip-installed (and `protperties` isn't on PyPI).
 3. App entry point / main file: **`biastracker/app.py`**.
 4. Python **3.11 or 3.12** (biastracker requires >= 3.10).
 
