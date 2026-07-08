@@ -230,6 +230,19 @@ _UNIPROT_HUMAN_QUERY = (
 )
 
 
+_PAXDB_RANK_LABEL = "PaxDb abundance (log₁₀ ppm) — reference proteome"
+
+
+@st.cache_data(show_spinner=False)
+def _paxdb_ppm() -> dict[str, float]:
+    """Return a UniProt-accession → PaxDb abundance (ppm) map (empty if missing)."""
+    path = Path(__file__).parent / "data" / "raw" / "paxdb" / "human_abundance_uniprot.csv"
+    if not path.exists():
+        return {}
+    df = pd.read_csv(path)
+    return {str(r.primary_id): float(r.paxdb_ppm) for r in df.itertuples()}
+
+
 def _fetch_human_proteome_ids() -> set[str]:
     """Fetch the reviewed human proteome accessions live from the UniProt API.
 
@@ -981,18 +994,26 @@ def _run_ora_ui(datasets: dict, annotations) -> None:
 
 
 def _run_fgsea_ui(datasets: dict, annotations) -> None:
-    from biastracker.analysis.enrichment import run_dataset_fgsea
+    from biastracker.analysis.enrichment import run_dataset_fgsea, run_fgsea
 
     names = list(datasets.keys())
     c1, c2 = st.columns(2)
     ds_name = c1.selectbox("Dataset", names, key="gsea_ds")
     ds = datasets[ds_name]
     numeric_cols = [c for c in ds.table.columns if pd.api.types.is_numeric_dtype(ds.table[c])]
-    if not numeric_cols:
+
+    # Offer PaxDb reference abundance as a ranking metric (for abundance-bias tests).
+    paxdb = _paxdb_ppm()
+    score_options = ([_PAXDB_RANK_LABEL] if paxdb else []) + numeric_cols
+    if not score_options:
         st.warning("This dataset has no numeric column to rank by.")
         return
-    score_col = c2.selectbox("Rank by (score column)", numeric_cols, key="gsea_score",
-                             format_func=lambda c: _FEAT_META.get(c, c))
+    score_col = c2.selectbox(
+        "Rank by (score column)", score_options, key="gsea_score",
+        format_func=lambda c: _FEAT_META.get(c, c),
+        help="Pick PaxDb abundance to test whether your detected proteins are "
+             "concentrated among the generally most-abundant proteins.",
+    )
 
     a1, a2, a3, a4 = st.columns(4)
     min_term = a1.number_input("Min term size", 1, 500, 5, key="gsea_min")
@@ -1003,16 +1024,38 @@ def _run_fgsea_ui(datasets: dict, annotations) -> None:
     if st.button("▶  Run fgsea", type="primary", key="gsea_run"):
         with st.spinner(f"Ranking by {score_col} · {int(n_perm)} permutations…"):
             try:
-                res = run_dataset_fgsea(
-                    ds, score_col=score_col, annotations=annotations, id_col=ds.id_col,
-                    min_term_size=int(min_term), max_term_size=(int(max_term) or None),
-                    n_permutations=int(n_perm), weight=float(weight), seed=0,
-                )
+                if score_col == _PAXDB_RANK_LABEL:
+                    ids = ds.table[ds.id_col].dropna().astype(str)
+                    ppm = pd.to_numeric(ids.map(paxdb), errors="coerce").to_numpy()
+                    # Build from arrays (positional) — passing a Series as index
+                    # would realign and drop everything.
+                    ranked = pd.Series(np.log10(ppm), index=ids.to_numpy())
+                    ranked = ranked.replace([np.inf, -np.inf], np.nan).dropna()
+                    covered = ranked.index.nunique()
+                    if covered < 2:
+                        st.error("Too few dataset proteins have a PaxDb abundance value "
+                                 "to rank (check that IDs are UniProt accessions).")
+                        return
+                    st.session_state["gsea_cov"] = (covered, ids.nunique())
+                    res = run_fgsea(
+                        ranked, annotations=annotations,
+                        min_term_size=int(min_term), max_term_size=(int(max_term) or None),
+                        n_permutations=int(n_perm), weight=float(weight), seed=0,
+                    )
+                    st.session_state["gsea_res"]   = res
+                    st.session_state["gsea_label"] = f"{ds_name} ranked by PaxDb abundance"
+                else:
+                    res = run_dataset_fgsea(
+                        ds, score_col=score_col, annotations=annotations, id_col=ds.id_col,
+                        min_term_size=int(min_term), max_term_size=(int(max_term) or None),
+                        n_permutations=int(n_perm), weight=float(weight), seed=0,
+                    )
+                    st.session_state["gsea_res"]   = res
+                    st.session_state["gsea_label"] = f"{ds_name} ranked by {score_col}"
+                    st.session_state.pop("gsea_cov", None)
             except Exception as exc:
                 st.error(str(exc))
                 return
-        st.session_state["gsea_res"]   = res
-        st.session_state["gsea_label"] = f"{ds_name} ranked by {score_col}"
 
     if "gsea_res" not in st.session_state:
         return
@@ -1025,7 +1068,11 @@ def _run_fgsea_ui(datasets: dict, annotations) -> None:
         return
 
     n_sig = int((res["fdr"] < 0.05).sum())
-    st.caption(f"{len(res):,} gene sets tested · {n_sig:,} significant at FDR < 0.05")
+    cap = f"{len(res):,} gene sets tested · {n_sig:,} significant at FDR < 0.05"
+    cov = st.session_state.get("gsea_cov")
+    if cov:
+        cap += f" · ranked {cov[0]:,}/{cov[1]:,} proteins with a PaxDb value"
+    st.caption(cap)
 
     _enrichment_bar(res.copy(), "nes", "Normalized Enrichment Score (NES)",
                     pos_label="high-score end", neg_label="low-score end")
