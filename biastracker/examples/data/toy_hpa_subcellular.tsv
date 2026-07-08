@@ -1,7 +1,0 @@
-Gene	Gene name	Reliability	Main location	Additional location	Extracellular location	Enhanced	Supported	Approved	Uncertain	Single-cell variation intensity	Single-cell variation spatial	Cell cycle dependency	GO id
-ENSG00000141510	TP53	Approved	Nucleoplasm	Cytosol			Nucleoplasm						Nucleoplasm (GO:0005654);Cytosol (GO:0005829)
-ENSG00000146648	EGFR	Supported	Plasma membrane	Endosomes			Plasma membrane						Plasma membrane (GO:0005886);Endosomes (GO:0005768)
-ENSG00000134057	CCNB1	Approved	Cytosol	Nucleoplasm			Cytosol						Cytosol (GO:0005829);Nucleoplasm (GO:0005654)
-ENSG00000105323	HNRNPK	Supported	Nucleoplasm	Cytosol			Nucleoplasm						Nucleoplasm (GO:0005654);Cytosol (GO:0005829)
-ENSG00000012048	BRCA1	Approved	Nucleoplasm					Nucleoplasm					Nucleoplasm (GO:0005654)
-ENSG00000254647	INS	Supported	Secreted	Secretory vesicles	Extracellular region		Secreted						Secreted (GO:0005576);Secretory vesicles (GO:0099503);Extracellular region (GO:0005576)

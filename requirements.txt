@@ -1,0 +1,13 @@
+# BiasTracker web deployment dependencies.
+#
+# BOTH packages live in this repo. `protperties` is NOT published on PyPI, so it
+# must be installed from its local path — a bare `pip install protperties` would
+# fail. Deployment hosts (Streamlit Community Cloud, Docker, etc.) check out the
+# whole repo, so these relative paths resolve from the repo root where this file
+# lives. protperties is listed first so it is present when biastracker resolves
+# its `protperties` dependency.
+#
+# `[app]` pulls in streamlit + plotly (the GUI extras). pyarrow/openpyxl for
+# reading .parquet / .xlsx inputs come transitively from protperties.
+./protperties
+./biastracker[app]

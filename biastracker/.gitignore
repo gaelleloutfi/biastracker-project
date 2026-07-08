@@ -1,3 +1,14 @@
 # pixi environments
 .pixi/*
 !.pixi/config.toml
+
+# Data not shipped with the app (moved to ../biastracker-project-archive).
+# The deployed app only needs the reference files kept under
+# data/raw/{contaminants,hpa,paxdb}/*_long*.csv and human_abundance_uniprot.csv.
+data/processed/
+data/raw/maxquant/
+data/raw/contaminants/contaminants.xlsx
+data/raw/hpa/subcellular_location.tsv
+data/raw/paxdb/9606-WHOLE_ORGANISM-integrated.txt
+examples/data/
+examples/annotations/toy_terms.csv

@@ -16,3 +16,12 @@ build/
 
 # PyTest cache
 .pytest_cache/
+
+# Dev scratch (notebooks, local caches) — do not commit
+temporary_folder/
+
+# Test fixtures + reference table kept outside the repo (see DEPLOY.md); the
+# tests that use them skip gracefully when absent. Backed up in
+# ../biastracker-project-archive.
+test_data/
+data/
