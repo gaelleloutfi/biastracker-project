@@ -507,7 +507,8 @@ def tab_distributions(datasets: dict) -> None:
     c1, c2, c3, c4 = st.columns([3, 3, 1, 1])
     feat   = c1.selectbox("Property", all_feats, format_func=_lbl)
     ptype  = c2.radio("Plot type", ["Histogram", "Violin", "CDF"], horizontal=True)
-    rug    = c3.checkbox("Rug", value=False)
+    rug    = c3.checkbox("Rug", value=False, help="Add a rug plot: small tick marks along the axis "
+                         "showing each individual data point's position.")
     logx   = c4.checkbox("Log₁₀", value=False, help="Log₁₀-transform values (drops ≤ 0)")
 
     axis_lbl = f"log₁₀ {_lbl(feat)}" if logx else _lbl(feat)
