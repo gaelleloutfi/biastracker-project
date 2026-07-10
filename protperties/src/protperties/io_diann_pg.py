@@ -16,7 +16,7 @@ from .protein_table import build_protein_table
 
 def from_diann_pg_matrix(
     path: str | Path,
-    protein_id_col_candidates: tuple[str, ...] = ("Protein.Ids", "Protein.Group", "Protein"),
+    protein_id_col_candidates: tuple[str, ...] = ("Protein.Group", "Protein.Ids", "Protein"),
     sample_cols: list[str] | None = None,
     statistic: Literal["mean", "median"] = "mean",
     drop_zeros: bool = True,
@@ -26,7 +26,12 @@ def from_diann_pg_matrix(
     """
     Load a DIA-NN report.pg_matrix.tsv file, compute expression across samples,
     and return a standardized protein-level DataFrame.
-    
+
+    One row is emitted per protein group. The representative accession is the
+    *first* entry of ``Protein.Group`` (DIA-NN's representative group column, the
+    equivalent of MaxQuant's ``Majority protein IDs``), falling back to
+    ``Protein.Ids`` / ``Protein``.
+
     Note: Protein-level expression tables may not contain sequences. The resulting
     DataFrame will have a boolean `has_sequence` column. Physicochemical properties 
     are only computed when sequences are available or successfully fetched.
@@ -99,8 +104,12 @@ def from_diann_pg_matrix(
         return accs[0] if accs else None
 
     df["primary_id"] = df[id_col].apply(_extract_primary)
-    df = df.dropna(subset=["primary_id"])
-    
+    df = df.dropna(subset=["primary_id"]).reset_index(drop=True)
+
+    # DIA-NN pg_matrix has no contaminant flag column (contaminants are filtered
+    # upstream). Expose the column anyway so both protein loaders share a schema.
+    df["is_contaminant"] = False
+
     if df.empty:
         df["sequence"] = pd.Series(dtype=str)
         df["has_sequence"] = False
