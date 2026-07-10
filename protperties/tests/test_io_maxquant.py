@@ -155,6 +155,38 @@ def test_semicolon_separated_ids_preserved(tmp_path):
     assert out.iloc[0]["protein_primary_id"] == "P12345"  # First ID from semicolon list
     assert out.iloc[1]["protein_primary_id"] == "P00001"  # Normalized from sp|P00001|PROT1
 
+def test_comma_decimal_pep_is_handled(tmp_path):
+    """
+    A stray European-style decimal comma in the PEP column (e.g. '1,00E-06',
+    as produced when an evidence.txt is re-saved by a comma-locale spreadsheet)
+    must not crash the numeric PEP filter. The value should be parsed as
+    1e-06 and, being below the threshold, the row should be kept.
+    """
+    df = pd.DataFrame({
+        "Raw file": ["run1", "run2", "run3"],
+        "Sequence": ["PEPTIDEK", "AAAAAAK", "TESTPEP"],
+        "Modified sequence": ["PEPTIDEK", "AAAAAAK", "TESTPEP"],
+        "Charge": [2, 2, 2],
+        "Leading razor protein": ["P12345", "Q9XXX1", "O43663"],
+        "Protein names": ["PROT1", "PROT2", "PROT3"],
+        "Gene names": ["Gene1", "Gene2", "Gene3"],
+        "Intensity": [1000.0, 2000.0, 3000.0],
+        # Second row uses a decimal comma -> whole column read as strings.
+        "PEP": ["0.005", "1,00E-06", "0.02"],
+        "Reverse": ["", "", ""],
+    })
+    path = tmp_path / "evidence_comma.txt"
+    df.to_csv(path, sep="\t", index=False)
+
+    out = from_maxquant_evidence(path)
+
+    # rows 1 and 2 pass (PEP <= 0.01); row 3 (0.02) is filtered out
+    assert len(out) == 2
+    assert set(out["Run"]) == {"run1", "run2"}
+    # the comma-decimal value must be parsed as a real float
+    comma_row = out.loc[out["Run"] == "run2"].iloc[0]
+    assert comma_row["PEP"] == 1e-06
+
 def test_from_maxquant_evidence_on_test_data():
     import pytest
     path = Path("test_data/evidence.txt")

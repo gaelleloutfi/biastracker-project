@@ -61,6 +61,34 @@ class MaxQuantFilterConfig:
     exclude_reverse:  bool = True
     exclude_contaminants: bool = False
                   
+def _coerce_numeric(s: pd.Series) -> pd.Series:
+    """
+    Coerce a possibly string-typed column to numeric.
+
+    MaxQuant writes numeric columns with a '.' decimal separator, but a file
+    that has been opened and re-saved in a spreadsheet under a comma-locale can
+    end up with stray European-style values such as ``1,00E-06``. A single such
+    value forces pandas to read the *whole* column as strings (object dtype),
+    which then breaks numeric comparisons like ``df["PEP"] <= 0.01``.
+
+    This helper normalizes the decimal comma to a period and coerces to float.
+    Values that still cannot be parsed become NaN.
+
+    Parameters
+    ----------
+    s : pandas.Series
+        Column to coerce.
+
+    Returns
+    -------
+    pandas.Series
+        Numeric (float) series.
+    """
+    if pd.api.types.is_numeric_dtype(s):
+        return s
+    cleaned = s.astype(str).str.strip().str.replace(",", ".", regex=False)
+    return pd.to_numeric(cleaned, errors="coerce")
+
 def _load_evidence(path: str | Path) -> pd.DataFrame:
     """
     Load MaxQuant evidence.txt file into a pandas DataFrame.
@@ -75,7 +103,7 @@ def _load_evidence(path: str | Path) -> pd.DataFrame:
     pandas.DataFrame
         Raw table as loaded from the disk.
     """
-    df = pd.read_csv(path, sep="\t")
+    df = pd.read_csv(path, sep="\t", low_memory=False)
     return df
 
 def _apply_mq_filters(df: pd.DataFrame, cfg: MaxQuantFilterConfig) -> pd.DataFrame:
@@ -105,9 +133,11 @@ def _apply_mq_filters(df: pd.DataFrame, cfg: MaxQuantFilterConfig) -> pd.DataFra
     
     mask = pd.Series(True, index=df.index)
 
-    # Filter on PEP if the column is present and a threshold is set. 
+    # Filter on PEP if the column is present and a threshold is set.
+    # Coerce first: a stray comma-decimal value (e.g. '1,00E-06') can make
+    # pandas type the whole column as strings, which breaks the comparison.
     if cfg.pep_col in df.columns and cfg.pep_max is not None:
-        mask &= df[cfg.pep_col] <= cfg.pep_max
+        mask &= _coerce_numeric(df[cfg.pep_col]) <= cfg.pep_max
 
     # Exclude reverse hits
     if cfg.exclude_reverse:
@@ -187,8 +217,14 @@ def from_maxquant_evidence(
     
     filters = filters or MaxQuantFilterConfig()
     df = _load_evidence(path)
+    # Normalize the numeric columns we rely on. A single stray comma-decimal
+    # value (e.g. '1,00E-06' from a spreadsheet re-save) would otherwise make
+    # pandas read the whole column as strings and break comparisons/quantitation.
+    for col in (filters.pep_col, filters.intensity_col):
+        if col in df.columns:
+            df[col] = _coerce_numeric(df[col])
     # we apply the basic filters
-    df= _apply_mq_filters(df, filters)    
+    df= _apply_mq_filters(df, filters)
     # rename columns with this mapping
     rename_map = {
         "Raw file": "Run",
