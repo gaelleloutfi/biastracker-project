@@ -234,10 +234,36 @@ _BUILTIN_ANNOTATIONS: dict[str, tuple[str, str]] = {
 
 
 _HUMAN_PROTEOME_LABEL = "Whole human proteome (UniProt Swiss-Prot, live)"
+_CUSTOM_BG_LABEL = "Upload custom background (TSV)"
 _UNIPROT_HUMAN_QUERY = (
     "https://rest.uniprot.org/uniprotkb/stream"
     "?query=reviewed:true+AND+organism_id:9606&fields=accession&format=list"
 )
+
+
+def _parse_background_ids(uploaded) -> set[str]:
+    """Extract UniProt accessions from an uploaded background file.
+
+    Robust to headers and layout: the file may be a single column of accessions
+    or any tab/comma-separated table. Every token is run through the same
+    normalisation used for dataset ``primary_id``s, so header words and other
+    non-accession text are ignored.
+    """
+    import re
+
+    from protperties.id_utils import extract_uniprot_accessions
+
+    raw = uploaded.getvalue().decode("utf-8", errors="replace")
+    ids: set[str] = set()
+    for token in re.split(r"[\s,]+", raw):
+        token = token.strip()
+        if not token:
+            continue
+        # extract_uniprot_accessions also splits ';'-grouped cells and handles
+        # sp|ACC|NAME headers.
+        for acc in extract_uniprot_accessions(token):
+            ids.add(acc)
+    return ids
 
 
 _PAXDB_RANK_LABEL = "PaxDb abundance (log₁₀ ppm) — reference proteome"
@@ -449,6 +475,141 @@ def render_sidebar() -> dict:
 #  Tab: Overview
 # ═══════════════════════════════════════════════════════════════
 
+def _hex_to_rgba(hex_color: str, alpha: float) -> str:
+    """Convert a #RRGGBB string to an rgba() string with the given alpha."""
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
+
+
+def _dataset_id_set(ds) -> set[str]:
+    """Unique identifier set for a dataset (its primary_id / id_col column)."""
+    if ds.id_col not in ds.table.columns:
+        return set()
+    return set(ds.table[ds.id_col].dropna().astype(str))
+
+
+def _venn_figure(sets: dict[str, set]) -> go.Figure:
+    """Build a 2- or 3-set Venn diagram of identifier overlaps with Plotly shapes.
+
+    Circles use fixed (non-area-proportional) geometry; every region is labelled
+    with its count so the diagram stays readable regardless of set sizes.
+    """
+    names = list(sets.keys())
+    fig = go.Figure()
+
+    def _circle(cx, cy, r, color):
+        fig.add_shape(
+            type="circle", xref="x", yref="y",
+            x0=cx - r, y0=cy - r, x1=cx + r, y1=cy + r,
+            line=dict(color=color, width=2),
+            fillcolor=_hex_to_rgba(color, 0.30), layer="below",
+        )
+
+    def _count(x, y, n, big=True):
+        fig.add_annotation(x=x, y=y, text=f"{n:,}", showarrow=False,
+                           font=dict(color=_NAVY, size=16 if big else 13))
+
+    def _title(x, y, label, color):
+        fig.add_annotation(x=x, y=y, text=f"<b>{label}</b>", showarrow=False,
+                           font=dict(color=color, size=13))
+
+    if len(names) == 2:
+        A, B = sets[names[0]], sets[names[1]]
+        cA, cB = _COLORS[0], _COLORS[1]
+        r = 0.95
+        _circle(-0.45, 0, r, cA)
+        _circle(0.45, 0, r, cB)
+        _count(-0.72, 0, len(A - B))
+        _count(0.72, 0, len(B - A))
+        _count(0.0, 0, len(A & B))
+        _title(-0.55, r + 0.15, names[0], cA)
+        _title(0.55, r + 0.15, names[1], cB)
+        x_range, y_range = [-1.75, 1.75], [-1.3, 1.4]
+    else:  # 3 sets
+        A, B, C = sets[names[0]], sets[names[1]], sets[names[2]]
+        cA, cB, cC = _COLORS[0], _COLORS[1], _COLORS[2]
+        r = 0.9
+        _circle(-0.42, 0.32, r, cA)
+        _circle(0.42, 0.32, r, cB)
+        _circle(0.0, -0.45, r, cC)
+        # Single-set-only regions
+        _count(-0.78, 0.68, len(A - B - C))
+        _count(0.78, 0.68, len(B - A - C))
+        _count(0.0, -1.02, len(C - A - B))
+        # Pairwise-only regions
+        _count(0.0, 0.72, len((A & B) - C))
+        _count(-0.55, -0.28, len((A & C) - B))
+        _count(0.55, -0.28, len((B & C) - A))
+        # Triple intersection
+        _count(0.0, 0.08, len(A & B & C))
+        _title(-0.7, 1.32, names[0], cA)
+        _title(0.7, 1.32, names[1], cB)
+        _title(0.0, -1.5, names[2], cC)
+        x_range, y_range = [-1.9, 1.9], [-1.75, 1.6]
+
+    fig.update_xaxes(visible=False, range=x_range)
+    fig.update_yaxes(visible=False, range=y_range, scaleanchor="x", scaleratio=1)
+    fig.update_layout(
+        template="plotly_white",
+        height=460,
+        margin=dict(l=10, r=10, t=10, b=10),
+        plot_bgcolor="rgba(0,0,0,0)",
+        showlegend=False,
+    )
+    return fig
+
+
+def _render_overlap_section(datasets: dict) -> None:
+    """Venn (2–3 datasets) or an overlap summary (>3) of identified proteins."""
+    id_sets = {name: _dataset_id_set(ds) for name, ds in datasets.items()}
+    id_sets = {n: s for n, s in id_sets.items() if s}
+    if len(id_sets) < 2:
+        return
+
+    st.markdown('<div class="bt-section">Identification overlap</div>', unsafe_allow_html=True)
+
+    names = list(id_sets.keys())
+    shared_all = set.intersection(*id_sets.values())
+    id_col = datasets[names[0]].id_col
+
+    if len(names) <= 3:
+        st.plotly_chart(_venn_figure(id_sets), use_container_width=True)
+        st.caption(
+            f"Counts are unique protein identifiers ({id_col}). "
+            f"{len(shared_all):,} shared across all {len(names)}."
+        )
+    else:
+        # >3 datasets: a proportional Venn is not meaningful for all of them at
+        # once. Let the user Venn any 2–3, and show a pairwise overlap matrix.
+        pick = st.multiselect(
+            "Datasets to compare (pick 2–3 for a Venn)", names,
+            default=names[:3], max_selections=3, key="venn_pick",
+        )
+        if 2 <= len(pick) <= 3:
+            st.plotly_chart(_venn_figure({n: id_sets[n] for n in pick}),
+                            use_container_width=True)
+        st.caption(
+            f"{len(names)} datasets loaded. Pairwise overlap matrix below "
+            f"(diagonal = dataset size); {len(shared_all):,} proteins are shared "
+            f"across all {len(names)}."
+        )
+        mat = pd.DataFrame(index=names, columns=names, dtype=int)
+        for a in names:
+            for b in names:
+                mat.loc[a, b] = len(id_sets[a]) if a == b else len(id_sets[a] & id_sets[b])
+        st.dataframe(mat, use_container_width=True)
+
+    # Per-dataset unique counts, useful alongside either view.
+    uniq_rows = []
+    for n in names:
+        others = set.union(*[id_sets[m] for m in names if m != n]) if len(names) > 1 else set()
+        uniq_rows.append({"Dataset": n, "Total IDs": len(id_sets[n]),
+                          "Unique to it": len(id_sets[n] - others)})
+    with st.expander("Unique / shared counts", expanded=False):
+        st.dataframe(pd.DataFrame(uniq_rows), use_container_width=True, hide_index=True)
+
+
 def tab_overview(datasets: dict) -> None:
     if not datasets:
         st.info("⬅ Upload at least one dataset from the sidebar to get started.")
@@ -489,6 +650,9 @@ def tab_overview(datasets: dict) -> None:
 
         st.markdown("")
 
+    # Cross-dataset identification overlap (Venn for 2–3 datasets).
+    _render_overlap_section(datasets)
+
 
 # ═══════════════════════════════════════════════════════════════
 #  Tab: Distributions
@@ -509,7 +673,28 @@ def tab_distributions(datasets: dict) -> None:
     ptype  = c2.radio("Plot type", ["Histogram", "Violin", "CDF"], horizontal=True)
     rug    = c3.checkbox("Rug", value=False, help="Add a rug plot: small tick marks along the axis "
                          "showing each individual data point's position.")
-    logx   = c4.checkbox("Log₁₀", value=False, help="Log₁₀-transform values (drops ≤ 0)")
+
+    # A log₁₀ transform is undefined for non-positive values. Forbid it entirely
+    # for properties that can be negative (e.g. GRAVY, net charge) rather than
+    # silently dropping those points, which would misrepresent the distribution.
+    feat_has_nonpos = any(
+        (ds.table[feat].dropna() <= 0).any()
+        for ds in datasets.values()
+        if feat in ds.table.columns
+    )
+    logx   = c4.checkbox(
+        "Log₁₀",
+        value=False,
+        disabled=feat_has_nonpos,
+        help=(
+            f"Log₁₀ is disabled for “{_lbl(feat)}” because it contains non-positive "
+            "values (log₁₀ is only defined for values > 0)."
+            if feat_has_nonpos
+            else "Log₁₀-transform values (drops ≤ 0)"
+        ),
+    )
+    if feat_has_nonpos:
+        logx = False
 
     axis_lbl = f"log₁₀ {_lbl(feat)}" if logx else _lbl(feat)
     n_dropped = 0
@@ -577,7 +762,9 @@ def tab_distributions(datasets: dict) -> None:
             ))
 
     st.plotly_chart(fig, use_container_width=True)
-    if logx and n_dropped:
+    if feat_has_nonpos:
+        st.caption(f"Log₁₀ unavailable for “{_lbl(feat)}” — it has non-positive values.")
+    elif logx and n_dropped:
         st.caption(f"Log₁₀ scale — {n_dropped:,} non-positive value(s) dropped.")
 
     # Side-by-side descriptive stats when multiple datasets loaded
@@ -896,7 +1083,8 @@ def _enrichment_bar(pdf: pd.DataFrame, x_col: str, x_title: str, pos_label: str,
     """Horizontal bar of the top terms, coloured by direction (pos/neg of x_col)."""
     sub = pdf.reindex(pdf[x_col].abs().sort_values(ascending=False).index).head(top_n)
     sub = sub.sort_values(x_col)
-    colors = [_CYAN if v >= 0 else "#FF6B6B" for v in sub[x_col]]
+    # Enriched / high-score terms are warm (red); depleted / low-score are teal.
+    colors = ["#FF6B6B" if v >= 0 else _CYAN for v in sub[x_col]]
     fig = go.Figure(go.Bar(
         x=sub[x_col], y=[_trunc(t) for t in sub["term_name"]],
         orientation="h", marker_color=colors, opacity=0.85,
@@ -910,14 +1098,14 @@ def _enrichment_bar(pdf: pd.DataFrame, x_col: str, x_title: str, pos_label: str,
         font=dict(color=_NAVY, size=12),
     )
     st.plotly_chart(fig, use_container_width=True)
-    st.caption(f"Teal = {pos_label}, red = {neg_label}. Showing top {len(sub)} terms.")
+    st.caption(f"Red = {pos_label}, teal = {neg_label}. Showing top {len(sub)} terms.")
 
 
 def _run_ora_ui(datasets: dict, annotations) -> None:
     from biastracker.analysis.enrichment import run_ora
 
     names = list(datasets.keys())
-    bg_options = ["All loaded datasets (union)", _HUMAN_PROTEOME_LABEL] + names
+    bg_options = ["All loaded datasets (union)", _HUMAN_PROTEOME_LABEL, _CUSTOM_BG_LABEL] + names
     c1, c2, c3 = st.columns(3)
     query_name = c1.selectbox("Query dataset", names, key="ora_query",
                               help="Proteins in this dataset form the query set.")
@@ -925,8 +1113,20 @@ def _run_ora_ui(datasets: dict, annotations) -> None:
                               key="ora_bg",
                               help="The reference set the query is tested against. The whole "
                                    "human proteome tests vs all human proteins (classic ORA); "
-                                   "the dataset options isolate method/detection bias.")
+                                   "the dataset options isolate method/detection bias; upload "
+                                   "your own list to restrict the universe (e.g. a tissue proteome).")
     min_term   = c3.number_input("Min term size", 1, 500, 3, key="ora_min")
+
+    custom_bg_file = None
+    if bg_choice == _CUSTOM_BG_LABEL:
+        custom_bg_file = st.file_uploader(
+            "Background accession list",
+            type=["tsv", "csv", "txt", "list"],
+            key="ora_bg_file",
+            help="One UniProt accession per line, or any tab/comma-separated table "
+                 "(headers and extra columns are ignored). The query is tested only "
+                 "against proteins in this universe.",
+        )
 
     if st.button("▶  Run ORA", type="primary", key="ora_run"):
         qds = datasets[query_name]
@@ -935,6 +1135,20 @@ def _run_ora_ui(datasets: dict, annotations) -> None:
             background_ids: set[str] = set()
             for ds in datasets.values():
                 background_ids |= set(ds.table[ds.id_col].dropna().astype(str))
+        elif bg_choice == _CUSTOM_BG_LABEL:
+            if custom_bg_file is None:
+                st.warning("Upload a background file first, or pick another background.")
+                return
+            background_ids = _parse_background_ids(custom_bg_file)
+            if not background_ids:
+                st.error("No UniProt accessions could be parsed from the uploaded file. "
+                         "Expected UniProt accessions (e.g. P12345), one per line or in a column.")
+                return
+            covered = len(query_ids & background_ids)
+            st.caption(
+                f"Custom background: {len(background_ids):,} accessions · "
+                f"{covered:,}/{len(query_ids):,} query proteins fall within it."
+            )
         elif bg_choice == _HUMAN_PROTEOME_LABEL:
             try:
                 with st.spinner("Fetching current human proteome from UniProt…"):
