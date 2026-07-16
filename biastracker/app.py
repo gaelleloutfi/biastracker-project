@@ -325,17 +325,14 @@ def _parse_background_ids(uploaded) -> tuple[set[str], list[str]]:
     return ids, ignored
 
 
-_PAXDB_RANK_LABEL = "PaxDb abundance (log₁₀ ppm) — reference proteome"
+_PAXDB_CSV_PATH = Path(__file__).parent / "data" / "raw" / "paxdb" / "human_abundance_uniprot.csv"
 
 
 @st.cache_data(show_spinner=False)
-def _paxdb_ppm() -> dict[str, float]:
-    """Return a UniProt-accession → PaxDb abundance (ppm) map (empty if missing)."""
-    path = Path(__file__).parent / "data" / "raw" / "paxdb" / "human_abundance_uniprot.csv"
-    if not path.exists():
-        return {}
-    df = pd.read_csv(path)
-    return {str(r.primary_id): float(r.paxdb_ppm) for r in df.itertuples()}
+def _paxdb_ppm() -> pd.Series:
+    """Return a UniProt-accession → PaxDb abundance (ppm) Series (empty if missing)."""
+    from biastracker.analysis.paxdb import load_paxdb_ppm
+    return load_paxdb_ppm(_PAXDB_CSV_PATH)
 
 
 def _fetch_human_proteome_ids() -> set[str]:
@@ -1185,6 +1182,144 @@ def _enrichment_bar(pdf: pd.DataFrame, x_col: str, x_title: str, pos_label: str,
     st.caption(f"Red = {pos_label}, teal = {neg_label}. Showing top {len(sub)} terms.")
 
 
+def _enrichment_volcano(vdf: pd.DataFrame, sig_threshold: float, effect_label: str,
+                        n_labels: int = 8) -> None:
+    """Volcano plot of enrichment terms: effect size (x) vs −log₁₀ FDR (y).
+
+    *vdf* must be the output of
+    :func:`biastracker.analysis.enrichment.prepare_enrichment_volcano_data`.
+    """
+    if vdf.empty:
+        st.info("No terms to plot.")
+        return
+
+    plot = vdf.dropna(subset=["effect", "neg_log10_fdr"]).copy()
+    if plot.empty:
+        st.info("No terms with a finite effect size and FDR to plot.")
+        return
+
+    # Three visual groups: significant up (red), significant down (teal),
+    # non-significant (grey). This encodes direction *and* significance.
+    def _group(r):
+        if not r["significant"]:
+            return "n.s."
+        return "enriched (top)" if r["direction"] == "positive" else "enriched (bottom)"
+
+    plot["grp"] = plot.apply(_group, axis=1)
+    palette = {"enriched (top)": "#FF6B6B", "enriched (bottom)": _CYAN, "n.s.": "#BBBBBB"}
+
+    fig = go.Figure()
+    for grp, color in palette.items():
+        sub = plot[plot["grp"] == grp]
+        if sub.empty:
+            continue
+        p_txt = sub["p_value"] if "p_value" in sub.columns else pd.Series([np.nan] * len(sub))
+        size_txt = sub["set_size"] if "set_size" in sub.columns else pd.Series([np.nan] * len(sub))
+        customdata = np.column_stack([
+            sub["fdr"].to_numpy(),
+            p_txt.to_numpy(),
+            size_txt.to_numpy(),
+        ])
+        fig.add_trace(go.Scatter(
+            x=sub["effect"], y=sub["neg_log10_fdr"],
+            mode="markers", name=grp,
+            marker=dict(color=color, size=8, opacity=0.75,
+                        line=dict(width=0.5, color="white")),
+            text=sub["term_name"].astype(str),
+            customdata=customdata,
+            hovertemplate=(
+                "<b>%{text}</b><br>"
+                f"{effect_label}: %{{x:.3f}}<br>"
+                "FDR: %{customdata[0]:.3g}<br>"
+                "p: %{customdata[1]:.3g}<br>"
+                "set size: %{customdata[2]:.0f}<extra></extra>"
+            ),
+        ))
+
+    # Reference lines: significance threshold and effect = 0.
+    y_thr = -np.log10(max(sig_threshold, 1e-300))
+    fig.add_hline(y=y_thr, line_dash="dash", line_color=_NAVY, line_width=1,
+                  annotation_text=f"FDR = {sig_threshold:g}", annotation_position="top left")
+    fig.add_vline(x=0, line_dash="dash", line_color=_NAVY, line_width=1)
+
+    # Label a few of the most significant terms, preferring significant ones.
+    labelled = plot.sort_values("neg_log10_fdr", ascending=False)
+    labelled = pd.concat([labelled[labelled["significant"]], labelled[~labelled["significant"]]])
+    for _, r in labelled.head(int(n_labels)).iterrows():
+        fig.add_annotation(
+            x=r["effect"], y=r["neg_log10_fdr"], text=_trunc(str(r["term_name"]), 28),
+            showarrow=True, arrowhead=0, arrowwidth=0.6, arrowcolor="#999",
+            font=dict(size=10, color=_NAVY), ax=0, ay=-14,
+        )
+
+    fig.update_layout(
+        template="plotly_white",
+        xaxis_title=effect_label,
+        yaxis_title="−log₁₀ FDR",
+        height=520,
+        legend=dict(orientation="h", y=1.06, x=1, xanchor="right"),
+        margin=dict(l=60, r=20, t=30, b=50),
+        font=dict(color=_NAVY, size=12),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    n_sig = int(plot["significant"].sum())
+    st.caption(
+        f"Red = enriched at the high-score (top) end, teal = enriched at the low-score "
+        f"(bottom) end, grey = not significant. {n_sig:,} term(s) at FDR ≤ {sig_threshold:g}."
+    )
+
+
+def _paxdb_scatter(res, dataset_name: str, trend: bool = True) -> None:
+    """Scatter of dataset mean abundance vs PaxDb abundance, with Spearman ρ.
+
+    *res* is a
+    :class:`biastracker.analysis.paxdb.PaxDbCorrelationResult`.
+    """
+    m = res.matched
+    if m.empty:
+        st.info("No proteins could be matched to PaxDb for this dataset.")
+        return
+
+    title = f"ρ = {res.rho:.3f}" if np.isfinite(res.rho) else "ρ = n/a"
+    title += f"  ·  n = {res.n_used:,} matched proteins"
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=m["dataset_abundance"], y=m["paxdb_abundance"],
+        mode="markers",
+        marker=dict(color=_dataset_color(dataset_name), size=6, opacity=0.55,
+                    line=dict(width=0.3, color="white")),
+        text=m["primary_id"].astype(str),
+        hovertemplate=("<b>%{text}</b><br>"
+                       f"{res.x_label}: %{{x:.3f}}<br>"
+                       f"{res.y_label}: %{{y:.3f}}<extra></extra>"),
+        name="proteins",
+    ))
+
+    # Optional visual trend line (least-squares). This is a display aid only —
+    # the reported statistic is the rank-based Spearman ρ, not this OLS fit.
+    if trend and len(m) >= 2:
+        x = m["dataset_abundance"].to_numpy(dtype=float)
+        y = m["paxdb_abundance"].to_numpy(dtype=float)
+        slope, intercept = np.polyfit(x, y, 1)
+        xs = np.array([x.min(), x.max()])
+        fig.add_trace(go.Scatter(
+            x=xs, y=slope * xs + intercept, mode="lines",
+            line=dict(color=_NAVY, width=1.5, dash="dash"),
+            name="trend (OLS)", hoverinfo="skip",
+        ))
+
+    fig.update_layout(
+        template="plotly_white",
+        title=dict(text=title, x=0.5, font=dict(size=14, color=_NAVY)),
+        xaxis_title=res.x_label, yaxis_title=res.y_label,
+        height=460, margin=dict(l=60, r=20, t=50, b=50),
+        font=dict(color=_NAVY, size=12),
+        showlegend=True, legend=dict(orientation="h", y=1.02, x=1, xanchor="right"),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
 def _run_ora_ui(datasets: dict, annotations) -> None:
     from biastracker.analysis.enrichment import run_ora
 
@@ -1309,26 +1444,68 @@ def _run_ora_ui(datasets: dict, annotations) -> None:
 
 
 def _run_fgsea_ui(datasets: dict, annotations) -> None:
-    from biastracker.analysis.enrichment import run_dataset_fgsea, run_fgsea
+    from biastracker.analysis.enrichment import (
+        DEFAULT_SIG_THRESHOLD, prepare_enrichment_volcano_data, run_fgsea,
+    )
+    from biastracker.analysis.ranking import (
+        CUSTOM, FGSEA_RANKING_METHODS, MEAN_EXPRESSION,
+        compute_mean_expression, detect_expression_columns, prepare_fgsea_ranking,
+    )
 
     names = list(datasets.keys())
     c1, c2 = st.columns(2)
     ds_name = c1.selectbox("Dataset", names, key="gsea_ds")
     ds = datasets[ds_name]
-    numeric_cols = [c for c in ds.table.columns if pd.api.types.is_numeric_dtype(ds.table[c])]
 
-    # Offer PaxDb reference abundance as a ranking metric (for abundance-bias tests).
-    paxdb = _paxdb_ppm()
-    score_options = ([_PAXDB_RANK_LABEL] if paxdb else []) + numeric_cols
-    if not score_options:
-        st.warning("This dataset has no numeric column to rank by.")
-        return
-    score_col = c2.selectbox(
-        "Rank by (score column)", score_options, key="gsea_score",
-        format_func=lambda c: _FEAT_META.get(c, c),
-        help="Pick PaxDb abundance to test whether your detected proteins are "
-             "concentrated among the generally most-abundant proteins.",
+    # ── Ranking metric: mean expression (default) or a custom numeric column ──
+    method = c2.radio(
+        "Ranking metric", list(FGSEA_RANKING_METHODS),
+        format_func=lambda m: FGSEA_RANKING_METHODS[m], key="gsea_method",
+        help="Mean expression ranks proteins by the row-wise mean of the LFQ / "
+             "expression columns. Custom metric ranks by a numeric column you "
+             "provide (e.g. a score shipped with a homemade dataset).",
     )
+
+    expression_columns: list[str] | None = None
+    custom_col: str | None = None
+    ranking_ok = True
+
+    if method == MEAN_EXPRESSION:
+        lfq_cols = detect_expression_columns(ds.table)
+        if lfq_cols:
+            expression_columns = st.multiselect(
+                "LFQ / expression columns to average",
+                lfq_cols, default=lfq_cols, key="gsea_lfq_cols",
+                help="Proteins are ranked by the row-wise mean of these columns.",
+            )
+            if not expression_columns:
+                st.warning("Select at least one expression column.")
+                ranking_ok = False
+        else:
+            # No per-sample columns (e.g. DIA-NN) — fall back to precomputed mean.
+            try:
+                compute_mean_expression(ds.table)  # validates a usable column exists
+                st.caption("No per-sample LFQ columns detected — ranking by the "
+                           "precomputed mean expression column.")
+            except ValueError as exc:
+                st.warning(str(exc))
+                ranking_ok = False
+    else:  # CUSTOM
+        numeric_cols = [c for c in ds.table.columns
+                        if pd.api.types.is_numeric_dtype(ds.table[c])]
+        if not numeric_cols:
+            st.warning("This dataset has no numeric column to use as a custom metric.")
+            ranking_ok = False
+        else:
+            # Preselect the dataset's own expression column for homemade datasets.
+            default_idx = 0
+            if ds.source_type in {"manual", "standard_csv"} and "expression" in numeric_cols:
+                default_idx = numeric_cols.index("expression")
+            custom_col = st.selectbox(
+                "Custom ranking column", numeric_cols, index=default_idx,
+                format_func=lambda c: _FEAT_META.get(c, c), key="gsea_custom_col",
+                help="Numeric column to rank proteins by (descending).",
+            )
 
     a1, a2, a3, a4 = st.columns(4)
     min_term = a1.number_input("Min term size", 1, 500, 5, key="gsea_min")
@@ -1336,41 +1513,32 @@ def _run_fgsea_ui(datasets: dict, annotations) -> None:
     n_perm   = a3.number_input("Permutations", 100, 10000, 1000, step=100, key="gsea_perm")
     weight   = a4.number_input("Weight", 0.0, 2.0, 1.0, step=0.5, key="gsea_weight")
 
-    if st.button("▶  Run fgsea", type="primary", key="gsea_run"):
-        with st.spinner(f"Ranking by {score_col} · {int(n_perm)} permutations…"):
+    if st.button("▶  Run fgsea", type="primary", key="gsea_run", disabled=not ranking_ok):
+        with st.spinner(f"Ranking · {int(n_perm)} permutations…"):
             try:
-                if score_col == _PAXDB_RANK_LABEL:
-                    ids = ds.table[ds.id_col].dropna().astype(str)
-                    ppm = pd.to_numeric(ids.map(paxdb), errors="coerce").to_numpy()
-                    # Build from arrays (positional) — passing a Series as index
-                    # would realign and drop everything.
-                    ranked = pd.Series(np.log10(ppm), index=ids.to_numpy())
-                    ranked = ranked.replace([np.inf, -np.inf], np.nan).dropna()
-                    covered = ranked.index.nunique()
-                    if covered < 2:
-                        st.error("Too few dataset proteins have a PaxDb abundance value "
-                                 "to rank (check that IDs are UniProt accessions).")
-                        return
-                    st.session_state["gsea_cov"] = (covered, ids.nunique())
-                    res = run_fgsea(
-                        ranked, annotations=annotations,
-                        min_term_size=int(min_term), max_term_size=(int(max_term) or None),
-                        n_permutations=int(n_perm), weight=float(weight), seed=0,
-                    )
-                    st.session_state["gsea_res"]   = res
-                    st.session_state["gsea_label"] = f"{ds_name} ranked by PaxDb abundance"
-                else:
-                    res = run_dataset_fgsea(
-                        ds, score_col=score_col, annotations=annotations, id_col=ds.id_col,
-                        min_term_size=int(min_term), max_term_size=(int(max_term) or None),
-                        n_permutations=int(n_perm), weight=float(weight), seed=0,
-                    )
-                    st.session_state["gsea_res"]   = res
-                    st.session_state["gsea_label"] = f"{ds_name} ranked by {score_col}"
-                    st.session_state.pop("gsea_cov", None)
+                ranked = prepare_fgsea_ranking(
+                    ds.table, id_col=ds.id_col, method=method,
+                    expression_columns=expression_columns, custom_col=custom_col,
+                )
+            except ValueError as exc:
+                st.warning(str(exc))
+                return
+            try:
+                res = run_fgsea(
+                    ranked, annotations=annotations,
+                    min_term_size=int(min_term), max_term_size=(int(max_term) or None),
+                    n_permutations=int(n_perm), weight=float(weight), seed=0,
+                )
             except Exception as exc:
                 st.error(str(exc))
                 return
+            metric_lbl = ("mean expression" if method == MEAN_EXPRESSION
+                          else f"custom metric ({custom_col})")
+            st.session_state["gsea_res"]   = res
+            st.session_state["gsea_label"] = f"{ds_name} ranked by {metric_lbl}"
+
+    # ── PaxDb abundance-agreement panel (independent of the fGSEA run) ─────────
+    _paxdb_agreement_panel(ds, ds_name)
 
     if "gsea_res" not in st.session_state:
         return
@@ -1382,15 +1550,20 @@ def _run_fgsea_ui(datasets: dict, annotations) -> None:
                    "annotation IDs match your dataset IDs.")
         return
 
-    n_sig = int((res["fdr"] < 0.05).sum())
-    cap = f"{len(res):,} gene sets tested · {n_sig:,} significant at FDR < 0.05"
-    cov = st.session_state.get("gsea_cov")
-    if cov:
-        cap += f" · ranked {cov[0]:,}/{cov[1]:,} proteins with a PaxDb value"
-    st.caption(cap)
+    n_sig = int((res["fdr"] < DEFAULT_SIG_THRESHOLD).sum())
+    st.caption(f"{len(res):,} gene sets tested · {n_sig:,} significant at "
+               f"FDR < {DEFAULT_SIG_THRESHOLD:g}")
 
-    _enrichment_bar(res.copy(), "nes", "Normalized Enrichment Score (NES)",
-                    pos_label="high-score end", neg_label="low-score end")
+    # Volcano is the default view; the bar chart remains available.
+    view = st.radio("Plot", ["Volcano", "Bar chart"], horizontal=True, key="gsea_plot")
+    if view == "Volcano":
+        vdf = prepare_enrichment_volcano_data(res, sig_threshold=DEFAULT_SIG_THRESHOLD)
+        effect_lbl = "NES" if vdf["effect_col"].iloc[0] == "nes" else "Enrichment score (ES)"
+        n_labels = st.slider("Terms to label", 0, 20, 8, key="gsea_labels")
+        _enrichment_volcano(vdf, DEFAULT_SIG_THRESHOLD, effect_lbl, n_labels=n_labels)
+    else:
+        _enrichment_bar(res.copy(), "nes", "Normalized Enrichment Score (NES)",
+                        pos_label="high-score end", neg_label="low-score end")
 
     disp = res.rename(columns={
         "term_name": "Term", "category": "Category", "set_size": "Set size",
@@ -1408,6 +1581,39 @@ def _run_fgsea_ui(datasets: dict, annotations) -> None:
         file_name=f"fgsea_{label.replace(' ', '_')}.csv",
         mime="text/csv", key="gsea_dl",
     )
+
+
+def _paxdb_agreement_panel(ds, ds_name: str) -> None:
+    """PaxDb abundance-agreement panel: Spearman ρ + scatter vs the reference."""
+    from biastracker.analysis.paxdb import paxdb_abundance_agreement
+
+    paxdb = _paxdb_ppm()
+    with st.expander("PaxDb abundance agreement (mean LFQ vs reference)", expanded=False):
+        if paxdb.empty:
+            st.caption("PaxDb reference table not available.")
+            return
+        st.caption(
+            "Spearman rank correlation between this dataset's mean-LFQ abundance and "
+            "the PaxDb reference proteome. It checks whether proteins that are abundant "
+            "here are generally abundant in the reference (rank agreement, not equality)."
+        )
+        if not st.button("▶  Compute PaxDb agreement", key=f"paxdb_run_{ds_name}"):
+            return
+        try:
+            res = paxdb_abundance_agreement(ds.table, id_col=ds.id_col, paxdb_ppm=paxdb)
+        except ValueError as exc:
+            st.warning(str(exc))
+            return
+        if res.message:
+            st.warning(res.message)
+        else:
+            st.caption(
+                f"ρ = {res.rho:.3f}  (p = {res.p_value:.2g})  ·  "
+                f"{res.n_used:,} proteins used  ·  matched "
+                f"{res.n_matched:,}/{res.n_input:,} ({100 * res.matched_fraction:.0f}%)"
+                + (f"  ·  {res.n_excluded:,} pair(s) excluded" if res.n_excluded else "")
+            )
+        _paxdb_scatter(res, ds_name)
 
 
 def tab_enrichment(datasets: dict) -> None:

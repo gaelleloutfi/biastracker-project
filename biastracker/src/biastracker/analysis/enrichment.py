@@ -58,6 +58,75 @@ _FGSEA_COLS = [
 
 _DATASET_FGSEA_COLS = ["dataset", "score_col"] + _FGSEA_COLS
 
+# Default FDR significance threshold shared across enrichment visualisations.
+DEFAULT_SIG_THRESHOLD = 0.05
+# Floor applied to FDR before -log10 so FDR == 0 does not become +inf.
+_FDR_FLOOR = 1e-300
+# Extra columns added by prepare_enrichment_volcano_data.
+_VOLCANO_EXTRA_COLS = ["effect", "neg_log10_fdr", "direction", "significant", "effect_col"]
+
+
+def prepare_enrichment_volcano_data(
+    result: pd.DataFrame,
+    effect_col: str | None = None,
+    fdr_col: str = "fdr",
+    sig_threshold: float = DEFAULT_SIG_THRESHOLD,
+    fdr_floor: float = _FDR_FLOOR,
+) -> pd.DataFrame:
+    """Augment an fGSEA (or ORA) result table with volcano-plot coordinates.
+
+    Adds, without mutating *result*:
+
+    * ``effect`` — the signed effect size. When *effect_col* is ``None`` it is
+      chosen as ``"nes"`` if present, otherwise ``"es"`` (fallback); pass an
+      explicit column to override.
+    * ``neg_log10_fdr`` — ``-log10(FDR)`` with FDR clipped to *fdr_floor* so
+      ``FDR == 0`` yields a large finite value instead of ``+inf``. Rows with a
+      missing FDR keep ``NaN`` here. The original FDR column is left untouched
+      for hover text.
+    * ``direction`` — ``"positive"`` (effect ≥ 0) or ``"negative"``.
+    * ``significant`` — ``FDR <= sig_threshold`` (missing FDR → ``False``).
+    * ``effect_col`` — the name of the effect column used.
+
+    An empty *result* returns an empty frame carrying the extra columns so
+    callers can rely on the schema.
+
+    Raises
+    ------
+    ValueError
+        If no usable effect column can be found, or the FDR column is missing.
+    """
+    if effect_col is None:
+        effect_col = "nes" if "nes" in result.columns else (
+            "es" if "es" in result.columns else None
+        )
+        if effect_col is None:
+            raise ValueError(
+                "No effect-size column found (expected 'nes' or 'es'); "
+                "pass effect_col explicitly."
+            )
+    elif effect_col not in result.columns:
+        raise ValueError(f"effect_col '{effect_col}' not found in result columns.")
+    if fdr_col not in result.columns:
+        raise ValueError(f"fdr_col '{fdr_col}' not found in result columns.")
+
+    out = result.copy()
+    if out.empty:
+        for col in _VOLCANO_EXTRA_COLS:
+            out[col] = pd.Series(dtype="object" if col == "direction" else "float64")
+        out["effect_col"] = pd.Series(dtype="object")
+        return out
+
+    fdr = pd.to_numeric(out[fdr_col], errors="coerce")
+    out["effect"] = pd.to_numeric(out[effect_col], errors="coerce")
+    out["neg_log10_fdr"] = -np.log10(fdr.clip(lower=fdr_floor))
+    # A missing FDR must not masquerade as significant or as a real y-coordinate.
+    out.loc[fdr.isna(), "neg_log10_fdr"] = np.nan
+    out["direction"] = np.where(out["effect"] >= 0, "positive", "negative")
+    out["significant"] = (fdr <= sig_threshold).fillna(False)
+    out["effect_col"] = effect_col
+    return out
+
 
 # ---------------------------------------------------------------------------
 # run_ora
