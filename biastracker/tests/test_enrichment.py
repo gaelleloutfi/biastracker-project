@@ -7,11 +7,73 @@ import pytest
 
 from biastracker.dataset import AnnotationSet, BiasDataset
 from biastracker.analysis.enrichment import (
+    prepare_enrichment_volcano_data,
     run_dataset_fgsea,
     run_fgsea,
     run_ora,
     run_group_ora,
 )
+
+
+# ---------------------------------------------------------------------------
+# prepare_enrichment_volcano_data
+# ---------------------------------------------------------------------------
+
+def _fgsea_like(**cols) -> pd.DataFrame:
+    base = {"term_name": ["T1", "T2", "T3"], "nes": [2.0, -1.5, 0.5],
+            "fdr": [0.001, 0.2, 0.0]}
+    base.update(cols)
+    return pd.DataFrame(base)
+
+
+def test_volcano_neg_log10_fdr_and_direction():
+    v = prepare_enrichment_volcano_data(_fgsea_like())
+    # -log10 of 0.001 == 3
+    assert np.isclose(v.loc[0, "neg_log10_fdr"], 3.0)
+    assert v.loc[0, "direction"] == "positive"
+    assert v.loc[1, "direction"] == "negative"
+    assert v.loc[0, "effect_col"] == "nes"
+
+
+def test_volcano_fdr_zero_is_finite():
+    v = prepare_enrichment_volcano_data(_fgsea_like())
+    # FDR == 0 (row 2) must not become +inf
+    assert np.isfinite(v.loc[2, "neg_log10_fdr"])
+    assert v.loc[2, "neg_log10_fdr"] > 0
+
+
+def test_volcano_missing_fdr_is_nan_and_not_significant():
+    v = prepare_enrichment_volcano_data(_fgsea_like(fdr=[0.001, np.nan, 0.5]))
+    assert np.isnan(v.loc[1, "neg_log10_fdr"])
+    assert not bool(v.loc[1, "significant"])
+
+
+def test_volcano_significance_threshold():
+    v = prepare_enrichment_volcano_data(_fgsea_like(fdr=[0.01, 0.2, 0.05]), sig_threshold=0.05)
+    assert bool(v.loc[0, "significant"]) is True     # 0.01 <= 0.05
+    assert bool(v.loc[1, "significant"]) is False    # 0.2
+    assert bool(v.loc[2, "significant"]) is True     # 0.05 == threshold
+
+
+def test_volcano_falls_back_to_es_when_no_nes():
+    df = pd.DataFrame({"term_name": ["T1", "T2"], "es": [1.0, -1.0], "fdr": [0.01, 0.2]})
+    v = prepare_enrichment_volcano_data(df)
+    assert v.loc[0, "effect_col"] == "es"
+    assert v.loc[0, "effect"] == 1.0
+
+
+def test_volcano_no_effect_column_raises():
+    df = pd.DataFrame({"term_name": ["T1"], "fdr": [0.01]})
+    with pytest.raises(ValueError, match="No effect-size column"):
+        prepare_enrichment_volcano_data(df)
+
+
+def test_volcano_empty_result_keeps_schema():
+    empty = pd.DataFrame(columns=["term_name", "nes", "fdr"])
+    v = prepare_enrichment_volcano_data(empty)
+    assert v.empty
+    for col in ("effect", "neg_log10_fdr", "direction", "significant"):
+        assert col in v.columns
 
 
 # ---------------------------------------------------------------------------
