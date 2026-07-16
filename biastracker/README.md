@@ -139,3 +139,36 @@ The workflow writes `results/tables/fgsea__*.csv` with enrichment score (`es`),
 normalized enrichment score (`nes`), permutation `p_value`, `fdr`, and
 `leading_edge` proteins. It also writes `results/figures/fgsea_dotplot__*.png`
 when results are non-empty.
+
+### fGSEA in the app (Enrichment → fgsea)
+
+The app narrows the fGSEA ranking to two scientifically meaningful choices
+(`biastracker.analysis.ranking.FGSEA_RANKING_METHODS`):
+
+- **Mean expression** (default) — proteins are ranked by the row-wise mean of the
+  dataset's LFQ / expression columns. When per-sample `LFQ intensity …` columns
+  are present you may choose which to average; otherwise the precomputed
+  `mean_lfq` / `expression` column is used. This is the natural abundance
+  ranking for most proteomics datasets.
+- **Custom metric** — rank by any numeric column you supply. For a homemade
+  dataset the `expression` column is preselected.
+
+Ranking handling: values are numerically coerced; missing/non-numeric/infinite
+values are dropped; duplicate accessions collapse to their **maximum**; ties keep
+input order (deterministic); the final ranking is sorted descending.
+
+**PaxDb abundance agreement.** PaxDb is no longer a ranking option; instead the
+_PaxDb abundance agreement_ panel computes a **Spearman rank correlation** between
+the dataset's mean-LFQ abundance and the PaxDb reference proteome (both log₁₀,
+non-positive values dropped). Spearman assesses whether the proteins that are
+abundant in your data are generally abundant in the reference (rank agreement),
+**not** absolute equality. The panel reports ρ, p-value, the number of matched
+proteins, and how many were excluded, alongside a scatter (`primary_id` on hover;
+the dashed line is a visual OLS trend, not the basis of the statistic).
+
+**Volcano plot.** Enrichment results default to a volcano plot — effect size
+(NES, or ES as a fallback) on the x-axis versus `−log10(FDR)` on the y-axis, with
+a significance line at the FDR threshold (default 0.05) and a vertical line at
+effect = 0. FDR is floored before the log so `FDR == 0` stays finite, and the
+original FDR is preserved in the hover text. The previous bar chart remains
+available via the plot selector.
