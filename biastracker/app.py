@@ -64,6 +64,8 @@ _FEAT_META: dict[str, str] = {
     "charge_at_pH":    "Net Charge at pH",
     "trypsin_sites":   "Trypsin Sites",
     "missed_cleavages":"Missed Cleavages",
+    "ext_cystine":     "Extinction Coeff. (cystine)",
+    "ext_reduced":     "Extinction Coeff. (reduced)",
     "expression":      "Expression",
     "PTR_AML":         "PTR (AML)",
 }
@@ -158,6 +160,36 @@ st.markdown(f"""
 #  Helpers
 # ═══════════════════════════════════════════════════════════════
 
+def _apply_lfq_filter(ds):
+    """Drop proteins with no LFQ value so they don't skew any downstream analysis.
+
+    Only proteins actually quantified (non-zero LFQ / ``n_samples_used`` > 0) are
+    kept, so physicochemical statistics reflect detected proteins rather than the
+    full identification table. Contaminants are **exempt**: they are retained as
+    ID-only rows (no sequence, so they never enter physicochemical stats) for the
+    contaminant ORA. Datasets with no quantification column (e.g. manual/standard
+    tables) are left unchanged. The number removed is stored in
+    ``ds.metadata['n_removed_no_lfq']``.
+    """
+    df = ds.table
+    # Key strictly on the LFQ-derived quantification count so manual/standard
+    # tables (which have no LFQ concept) are left untouched.
+    if "n_samples_used" not in df.columns:
+        ds.metadata["n_removed_no_lfq"] = 0
+        return ds
+    has_lfq = df["n_samples_used"].fillna(0) > 0
+
+    if "is_contaminant" in df.columns:
+        is_contam = df["is_contaminant"].fillna(False).astype(bool)
+    else:
+        is_contam = pd.Series(False, index=df.index)
+
+    keep = has_lfq | is_contam
+    ds.metadata["n_removed_no_lfq"] = int((~keep).sum())
+    ds.table = df[keep].reset_index(drop=True)
+    return ds
+
+
 @st.cache_data(show_spinner=False)
 def _load(file_bytes: bytes, filename: str, ds_type: str, name: str, level: str, ph: float = 8.5):
     """Load a dataset from raw bytes. Returns (BiasDataset | None, error | None).
@@ -192,6 +224,7 @@ def _load(file_bytes: bytes, filename: str, ds_type: str, name: str, level: str,
             "standard_csv":           lambda p: load_standard_table(p, name=name, level=level),
         }
         ds = dispatch[ds_type](tmp_path)
+        ds = _apply_lfq_filter(ds)
         return ds, None
     except Exception as exc:
         return None, str(exc)
@@ -506,24 +539,18 @@ def _hex_to_rgba(hex_color: str, alpha: float) -> str:
     return f"rgba({r},{g},{b},{alpha})"
 
 
-def _dataset_id_set(ds, mode: str = "quantified") -> set[str]:
-    """Unique identifier set for a dataset.
+def _dataset_id_set(ds) -> set[str]:
+    """Unique protein identifiers for a dataset, excluding contaminants.
 
-    ``mode="identified"`` returns every ``primary_id`` in the table (the full
-    identification list). ``mode="quantified"`` (default) restricts to proteins
-    that were actually detected — a non-missing/non-zero expression value — which
-    is the meaningful set when comparing sample-prep methods, since MaxQuant
-    often shares one identification table across runs and only the per-sample
-    LFQ columns differ.
+    Non-quantified proteins are already removed at load (see
+    :func:`_apply_lfq_filter`), so this is the set of detected, non-contaminant
+    proteins — the meaningful set for cross-dataset overlap.
     """
     if ds.id_col not in ds.table.columns:
         return set()
     df = ds.table
-    if mode == "quantified":
-        if "n_samples_used" in df.columns:
-            df = df[df["n_samples_used"].fillna(0) > 0]
-        elif "expression" in df.columns:
-            df = df[df["expression"].notna() & (df["expression"] != 0)]
+    if "is_contaminant" in df.columns:
+        df = df[~df["is_contaminant"].fillna(False).astype(bool)]
     return set(df[ds.id_col].dropna().astype(str))
 
 
@@ -603,31 +630,20 @@ def _render_overlap_section(datasets: dict) -> None:
     """Venn (2–3 datasets) or an overlap summary (>3) of proteins per dataset."""
     st.markdown('<div class="bt-section">Identification overlap</div>', unsafe_allow_html=True)
 
-    mode_label = st.radio(
-        "Compare", ["Quantified (detected)", "Identified (all rows)"],
-        horizontal=True, key="venn_mode",
-        help="Quantified counts only proteins with a non-zero LFQ value in each "
-             "dataset (what each method actually detected). Identified counts every "
-             "row — if datasets share one MaxQuant identification table this is "
-             "often ~100% overlap and not informative.",
-    )
-    mode = "identified" if mode_label.startswith("Identified") else "quantified"
-
-    id_sets = {name: _dataset_id_set(ds, mode) for name, ds in datasets.items()}
+    id_sets = {name: _dataset_id_set(ds) for name, ds in datasets.items()}
     id_sets = {n: s for n, s in id_sets.items() if s}
     if len(id_sets) < 2:
-        st.caption("Need at least two datasets with proteins in this view to compare.")
+        st.caption("Need at least two datasets with quantified proteins to compare.")
         return
 
     names = list(id_sets.keys())
     shared_all = set.intersection(*id_sets.values())
     id_col = datasets[names[0]].id_col
 
-    mode_word = "identified" if mode == "identified" else "quantified (LFQ > 0)"
     if len(names) <= 3:
         st.plotly_chart(_venn_figure(id_sets), use_container_width=True)
         st.caption(
-            f"Counts are unique {mode_word} protein identifiers ({id_col}). "
+            f"Counts are unique quantified proteins ({id_col}); contaminants excluded. "
             f"{len(shared_all):,} shared across all {len(names)}."
         )
     else:
@@ -641,9 +657,9 @@ def _render_overlap_section(datasets: dict) -> None:
             st.plotly_chart(_venn_figure({n: id_sets[n] for n in pick}),
                             use_container_width=True)
         st.caption(
-            f"{len(names)} datasets loaded ({mode_word}). Pairwise overlap matrix "
-            f"below (diagonal = dataset size); {len(shared_all):,} proteins are "
-            f"shared across all {len(names)}."
+            f"{len(names)} datasets loaded (quantified proteins, contaminants "
+            f"excluded). Pairwise overlap matrix below (diagonal = dataset size); "
+            f"{len(shared_all):,} proteins shared across all {len(names)}."
         )
         mat = pd.DataFrame(index=names, columns=names, dtype=int)
         for a in names:
@@ -673,10 +689,8 @@ def tab_overview(datasets: dict) -> None:
 
         n_rows   = len(ds.table)
         n_unique = ds.table[ds.id_col].nunique() if ds.id_col in ds.table.columns else "—"
-        # Quantified = unique IDs actually detected (non-zero LFQ). Equals Unique
-        # IDs for datasets with no expression/LFQ column.
-        has_quant = "n_samples_used" in ds.table.columns or "expression" in ds.table.columns
-        n_quant  = len(_dataset_id_set(ds, "quantified")) if has_quant else None
+        # Proteins dropped at load for having no LFQ (see _apply_lfq_filter).
+        n_removed = ds.metadata.get("n_removed_no_lfq")
         n_seq    = int(
             (ds.table["sequence"].notna() &
              (ds.table["sequence"].astype(str).str.strip() != "")).sum()
@@ -693,7 +707,7 @@ def tab_overview(datasets: dict) -> None:
             unsafe_allow_html=True,
         )
         c3.markdown(
-            _card_html(f"{n_quant:,}" if n_quant is not None else "—", "Quantified (LFQ&gt;0)"),
+            _card_html(f"{n_removed:,}" if n_removed is not None else "—", "Removed (no LFQ)"),
             unsafe_allow_html=True,
         )
         c4.markdown(_card_html(f"{n_seq:,}", "With Sequence"), unsafe_allow_html=True)
