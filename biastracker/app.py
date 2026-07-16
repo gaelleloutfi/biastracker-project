@@ -289,13 +289,20 @@ _UNIPROT_HUMAN_QUERY = (
 )
 
 
-def _parse_background_ids(uploaded) -> set[str]:
+def _parse_background_ids(uploaded) -> tuple[set[str], list[str]]:
     """Extract UniProt accessions from an uploaded background file.
 
-    Robust to headers and layout: the file may be a single column of accessions
-    or any tab/comma-separated table. Every token is run through the same
-    normalisation used for dataset ``primary_id``s, so header words and other
-    non-accession text are ignored.
+    The background is treated as **UniProt accessions only**. The file may be a
+    single column of accessions or any tab/comma-separated table (a header row
+    is fine). Each token is validated as a UniProt accession; ``sp|ACC|NAME``
+    headers and ``;``-grouped cells are resolved to their accession(s).
+
+    Returns
+    -------
+    (ids, ignored)
+        ``ids`` is the set of valid UniProt accessions found; ``ignored`` is the
+        list of distinct tokens that were *not* UniProt accessions (e.g. gene
+        symbols, other ID types, header words), so the caller can warn the user.
     """
     import re
 
@@ -303,15 +310,19 @@ def _parse_background_ids(uploaded) -> set[str]:
 
     raw = uploaded.getvalue().decode("utf-8", errors="replace")
     ids: set[str] = set()
+    ignored: list[str] = []
+    seen_ignored: set[str] = set()
     for token in re.split(r"[\s,]+", raw):
         token = token.strip()
         if not token:
             continue
-        # extract_uniprot_accessions also splits ';'-grouped cells and handles
-        # sp|ACC|NAME headers.
-        for acc in extract_uniprot_accessions(token):
-            ids.add(acc)
-    return ids
+        accs = extract_uniprot_accessions(token)
+        if accs:
+            ids.update(accs)
+        elif token not in seen_ignored:
+            seen_ignored.add(token)
+            ignored.append(token)
+    return ids, ignored
 
 
 _PAXDB_RANK_LABEL = "PaxDb abundance (log₁₀ ppm) — reference proteome"
@@ -1212,14 +1223,20 @@ def _run_ora_ui(datasets: dict, annotations) -> None:
             if custom_bg_file is None:
                 st.warning("Upload a background file first, or pick another background.")
                 return
-            background_ids = _parse_background_ids(custom_bg_file)
+            background_ids, ignored = _parse_background_ids(custom_bg_file)
             if not background_ids:
                 st.error("No UniProt accessions could be parsed from the uploaded file. "
                          "Expected UniProt accessions (e.g. P12345), one per line or in a column.")
                 return
+            if ignored:
+                examples = ", ".join(ignored[:5]) + ("…" if len(ignored) > 5 else "")
+                st.warning(
+                    f"{len(ignored):,} entr{'y was' if len(ignored) == 1 else 'ies were'} "
+                    f"ignored (not UniProt IDs): {examples}"
+                )
             covered = len(query_ids & background_ids)
             st.caption(
-                f"Custom background: {len(background_ids):,} accessions · "
+                f"Custom background: {len(background_ids):,} UniProt accessions · "
                 f"{covered:,}/{len(query_ids):,} query proteins fall within it."
             )
         elif bg_choice == _HUMAN_PROTEOME_LABEL:
