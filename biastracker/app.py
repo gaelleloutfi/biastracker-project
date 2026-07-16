@@ -482,11 +482,25 @@ def _hex_to_rgba(hex_color: str, alpha: float) -> str:
     return f"rgba({r},{g},{b},{alpha})"
 
 
-def _dataset_id_set(ds) -> set[str]:
-    """Unique identifier set for a dataset (its primary_id / id_col column)."""
+def _dataset_id_set(ds, mode: str = "quantified") -> set[str]:
+    """Unique identifier set for a dataset.
+
+    ``mode="identified"`` returns every ``primary_id`` in the table (the full
+    identification list). ``mode="quantified"`` (default) restricts to proteins
+    that were actually detected — a non-missing/non-zero expression value — which
+    is the meaningful set when comparing sample-prep methods, since MaxQuant
+    often shares one identification table across runs and only the per-sample
+    LFQ columns differ.
+    """
     if ds.id_col not in ds.table.columns:
         return set()
-    return set(ds.table[ds.id_col].dropna().astype(str))
+    df = ds.table
+    if mode == "quantified":
+        if "n_samples_used" in df.columns:
+            df = df[df["n_samples_used"].fillna(0) > 0]
+        elif "expression" in df.columns:
+            df = df[df["expression"].notna() & (df["expression"] != 0)]
+    return set(df[ds.id_col].dropna().astype(str))
 
 
 def _venn_figure(sets: dict[str, set]) -> go.Figure:
@@ -561,22 +575,34 @@ def _venn_figure(sets: dict[str, set]) -> go.Figure:
 
 
 def _render_overlap_section(datasets: dict) -> None:
-    """Venn (2–3 datasets) or an overlap summary (>3) of identified proteins."""
-    id_sets = {name: _dataset_id_set(ds) for name, ds in datasets.items()}
+    """Venn (2–3 datasets) or an overlap summary (>3) of proteins per dataset."""
+    st.markdown('<div class="bt-section">Identification overlap</div>', unsafe_allow_html=True)
+
+    mode_label = st.radio(
+        "Compare", ["Quantified (detected)", "Identified (all rows)"],
+        horizontal=True, key="venn_mode",
+        help="Quantified counts only proteins with a non-zero LFQ value in each "
+             "dataset (what each method actually detected). Identified counts every "
+             "row — if datasets share one MaxQuant identification table this is "
+             "often ~100% overlap and not informative.",
+    )
+    mode = "identified" if mode_label.startswith("Identified") else "quantified"
+
+    id_sets = {name: _dataset_id_set(ds, mode) for name, ds in datasets.items()}
     id_sets = {n: s for n, s in id_sets.items() if s}
     if len(id_sets) < 2:
+        st.caption("Need at least two datasets with proteins in this view to compare.")
         return
-
-    st.markdown('<div class="bt-section">Identification overlap</div>', unsafe_allow_html=True)
 
     names = list(id_sets.keys())
     shared_all = set.intersection(*id_sets.values())
     id_col = datasets[names[0]].id_col
 
+    mode_word = "identified" if mode == "identified" else "quantified (LFQ > 0)"
     if len(names) <= 3:
         st.plotly_chart(_venn_figure(id_sets), use_container_width=True)
         st.caption(
-            f"Counts are unique protein identifiers ({id_col}). "
+            f"Counts are unique {mode_word} protein identifiers ({id_col}). "
             f"{len(shared_all):,} shared across all {len(names)}."
         )
     else:
@@ -590,9 +616,9 @@ def _render_overlap_section(datasets: dict) -> None:
             st.plotly_chart(_venn_figure({n: id_sets[n] for n in pick}),
                             use_container_width=True)
         st.caption(
-            f"{len(names)} datasets loaded. Pairwise overlap matrix below "
-            f"(diagonal = dataset size); {len(shared_all):,} proteins are shared "
-            f"across all {len(names)}."
+            f"{len(names)} datasets loaded ({mode_word}). Pairwise overlap matrix "
+            f"below (diagonal = dataset size); {len(shared_all):,} proteins are "
+            f"shared across all {len(names)}."
         )
         mat = pd.DataFrame(index=names, columns=names, dtype=int)
         for a in names:
@@ -622,13 +648,17 @@ def tab_overview(datasets: dict) -> None:
 
         n_rows   = len(ds.table)
         n_unique = ds.table[ds.id_col].nunique() if ds.id_col in ds.table.columns else "—"
+        # Quantified = unique IDs actually detected (non-zero LFQ). Equals Unique
+        # IDs for datasets with no expression/LFQ column.
+        has_quant = "n_samples_used" in ds.table.columns or "expression" in ds.table.columns
+        n_quant  = len(_dataset_id_set(ds, "quantified")) if has_quant else None
         n_seq    = int(
             (ds.table["sequence"].notna() &
              (ds.table["sequence"].astype(str).str.strip() != "")).sum()
         )
         n_feats  = len(_available_features(ds))
 
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3, c4, c5 = st.columns(5)
         c1.markdown(_card_html(f"{n_rows:,}", f"Rows ({ds.level})"), unsafe_allow_html=True)
         c2.markdown(
             _card_html(
@@ -637,8 +667,12 @@ def tab_overview(datasets: dict) -> None:
             ),
             unsafe_allow_html=True,
         )
-        c3.markdown(_card_html(f"{n_seq:,}", "With Sequence"), unsafe_allow_html=True)
-        c4.markdown(_card_html(str(n_feats), "Features Available"), unsafe_allow_html=True)
+        c3.markdown(
+            _card_html(f"{n_quant:,}" if n_quant is not None else "—", "Quantified (LFQ&gt;0)"),
+            unsafe_allow_html=True,
+        )
+        c4.markdown(_card_html(f"{n_seq:,}", "With Sequence"), unsafe_allow_html=True)
+        c5.markdown(_card_html(str(n_feats), "Features Available"), unsafe_allow_html=True)
 
         with st.expander("Feature summary table", expanded=False):
             feats = _available_features(ds)
