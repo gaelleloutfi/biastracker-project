@@ -37,6 +37,21 @@ _BLUE   = "#1565C0"
 _CYAN   = "#00B4D8"
 _COLORS = [_CYAN, "#FF6B6B", "#FFD93D", "#6BCB77", "#845EC2", "#F9A825"]
 
+
+def _default_dataset_color(idx: int) -> str:
+    """Fallback palette colour for the idx-th dataset."""
+    return _COLORS[idx % len(_COLORS)]
+
+
+def _dataset_color(name: str, fallback_idx: int = 0) -> str:
+    """The user-chosen colour for a dataset (by name), or a palette fallback.
+
+    Colours are stored in ``st.session_state['ds_colors']`` keyed by dataset
+    name and set by the per-dataset colour pickers in the sidebar, so a
+    dataset's colour is consistent across every visualisation.
+    """
+    return st.session_state.get("ds_colors", {}).get(name, _default_dataset_color(fallback_idx))
+
 # ── Feature registry ──────────────────────────────────────────────────────────
 _FEAT_META: dict[str, str] = {
     "length":          "Sequence Length",
@@ -408,8 +423,17 @@ def render_sidebar() -> dict:
         for pos, slot in enumerate(slots, start=1):
             with st.expander(f"Dataset {pos}", expanded=(pos == len(slots))):
                 name = st.text_input("Name", value=f"Dataset {pos}", key=f"ds_name_{slot}")
-                type_label = st.selectbox("Type", list(_DS_TYPES), key=f"ds_type_{slot}")
+                nc1, nc2 = st.columns([4, 1])
+                type_label = nc1.selectbox("Type", list(_DS_TYPES), key=f"ds_type_{slot}")
                 ds_type = _DS_TYPES[type_label]
+                # Per-dataset colour, applied consistently across all charts.
+                picked = nc2.color_picker(
+                    "Colour", value=_default_dataset_color(pos - 1),
+                    key=f"ds_color_{slot}",
+                    help="This colour represents the dataset in every visualisation "
+                         "(distributions, Venn, …).",
+                )
+                st.session_state.setdefault("ds_colors", {})[name] = picked
 
                 if ds_type in _FIXED_LEVEL:
                     level = _FIXED_LEVEL[ds_type]
@@ -530,7 +554,7 @@ def _venn_figure(sets: dict[str, set]) -> go.Figure:
 
     if len(names) == 2:
         A, B = sets[names[0]], sets[names[1]]
-        cA, cB = _COLORS[0], _COLORS[1]
+        cA, cB = _dataset_color(names[0], 0), _dataset_color(names[1], 1)
         r = 0.95
         _circle(-0.45, 0, r, cA)
         _circle(0.45, 0, r, cB)
@@ -542,7 +566,8 @@ def _venn_figure(sets: dict[str, set]) -> go.Figure:
         x_range, y_range = [-1.75, 1.75], [-1.3, 1.4]
     else:  # 3 sets
         A, B, C = sets[names[0]], sets[names[1]], sets[names[2]]
-        cA, cB, cC = _COLORS[0], _COLORS[1], _COLORS[2]
+        cA, cB, cC = (_dataset_color(names[0], 0), _dataset_color(names[1], 1),
+                      _dataset_color(names[2], 2))
         r = 0.9
         _circle(-0.42, 0.32, r, cA)
         _circle(0.42, 0.32, r, cB)
@@ -762,7 +787,7 @@ def tab_distributions(datasets: dict) -> None:
         if feat not in ds.table.columns:
             continue
         data  = _prep(ds.table[feat].dropna().values)
-        color = _COLORS[i % len(_COLORS)]
+        color = _dataset_color(name, i)
         if len(data) == 0:
             continue
 
