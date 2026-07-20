@@ -18,7 +18,6 @@ def check_protperties_available():
             from_diann_pg_matrix, # noqa: F401
             from_manual_table, # noqa: F401
             build_protein_table, # noqa: F401
-            add_ptr_annotation, # noqa: F401
         ) # noqa: F401
     except ImportError as e:
         raise ImportError(

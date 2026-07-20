@@ -67,12 +67,11 @@ _FEAT_META: dict[str, str] = {
     "ext_cystine":     "Extinction Coeff. (cystine)",
     "ext_reduced":     "Extinction Coeff. (reduced)",
     "expression":      "Expression",
-    "PTR_AML":         "PTR (AML)",
 }
 
 # Abundance / large-magnitude features whose raw units dwarf the per-residue
 # physicochemical features on a shared Δ axis — optionally hidden from charts.
-_INTENSITY_FEATS: set[str] = {"expression", "PTR_AML", "ext_reduced", "ext_cystine"}
+_INTENSITY_FEATS: set[str] = {"expression", "ext_reduced", "ext_cystine"}
 
 _DS_TYPES: dict[str, str] = {
     "DIA-NN Report (.parquet)":     "diann_report",
@@ -943,7 +942,7 @@ def _render_pairwise_compare(datasets: dict) -> None:
     hide_int = cc2.checkbox(
         "Hide intensity-type features", value=False,
         help="Hide abundance / large-magnitude features (expression, extinction "
-             "coefficients, PTR) that otherwise dominate the raw axis.",
+             "coefficients) that otherwise dominate the raw axis.",
     )
     standardized = scale.startswith("Standardized")
 
@@ -1069,7 +1068,7 @@ def _render_multi_compare(datasets: dict) -> None:
     hide_int = st.checkbox(
         "Hide intensity-type features", value=False, key="multi_hide_int",
         help="Hide abundance / large-magnitude features (expression, extinction "
-             "coefficients, PTR) from the charts and tables below.",
+             "coefficients) from the charts and tables below.",
     )
     res_v = res[~res["feature"].isin(_INTENSITY_FEATS)] if hide_int else res
 
