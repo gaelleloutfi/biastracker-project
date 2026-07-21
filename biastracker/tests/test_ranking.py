@@ -138,6 +138,29 @@ def test_prepare_ranking_too_few_values_raises():
         prepare_fgsea_ranking(df, "primary_id", CUSTOM, custom_col="my_metric")
 
 
+def test_prepare_ranking_excludes_contaminants_by_default():
+    df = _df(
+        primary_id=["P1", "P2", "P3"],
+        my_metric=[9.0, 8.0, 7.0],
+        is_contaminant=[False, True, False],
+    )
+    s = prepare_fgsea_ranking(df, "primary_id", CUSTOM, custom_col="my_metric")
+    assert "P2" not in s.index                       # contaminant dropped
+    assert set(s.index) == {"P1", "P3"}
+
+
+def test_prepare_ranking_can_keep_contaminants():
+    df = _df(
+        primary_id=["P1", "P2", "P3"],
+        my_metric=[9.0, 8.0, 7.0],
+        is_contaminant=[False, True, False],
+    )
+    s = prepare_fgsea_ranking(
+        df, "primary_id", CUSTOM, custom_col="my_metric", exclude_contaminants=False,
+    )
+    assert "P2" in s.index
+
+
 def test_prepare_ranking_deterministic_tie_order():
     df = _df(
         primary_id=["P1", "P2", "P3"],

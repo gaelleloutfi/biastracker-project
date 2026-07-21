@@ -122,6 +122,7 @@ def prepare_fgsea_ranking(
     method: str = DEFAULT_RANKING_METHOD,
     expression_columns: list[str] | None = None,
     custom_col: str | None = None,
+    exclude_contaminants: bool = True,
 ) -> pd.Series:
     """Build a clean, named, descending ranking Series for :func:`run_fgsea`.
 
@@ -138,6 +139,11 @@ def prepare_fgsea_ranking(
         Optional explicit LFQ columns for ``method="mean_expression"``.
     custom_col:
         Numeric column to rank by for ``method="custom"``.
+    exclude_contaminants:
+        When ``True`` (default) rows flagged ``is_contaminant`` are dropped
+        before ranking, so contaminants (kept ID-only in the dataset for the
+        contaminant ORA) do not distort the fGSEA ranking. Ignored when the
+        table has no ``is_contaminant`` column.
 
     Returns
     -------
@@ -154,6 +160,9 @@ def prepare_fgsea_ranking(
     """
     if id_col not in df.columns:
         raise ValueError(f"id_col '{id_col}' not found in table.")
+
+    if exclude_contaminants and "is_contaminant" in df.columns:
+        df = df[~df["is_contaminant"].fillna(False).astype(bool)]
 
     if method == MEAN_EXPRESSION:
         values = compute_mean_expression(df, expression_columns)
