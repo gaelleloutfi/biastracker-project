@@ -67,11 +67,12 @@ _FEAT_META: dict[str, str] = {
     "ext_cystine":     "Extinction Coeff. (cystine)",
     "ext_reduced":     "Extinction Coeff. (reduced)",
     "expression":      "Expression",
+    "paxdb_log10_ppm": "PaxDb abundance (log₁₀ ppm)",
 }
 
 # Abundance / large-magnitude features whose raw units dwarf the per-residue
 # physicochemical features on a shared Δ axis — optionally hidden from charts.
-_INTENSITY_FEATS: set[str] = {"expression", "ext_reduced", "ext_cystine"}
+_INTENSITY_FEATS: set[str] = {"expression", "ext_reduced", "ext_cystine", "paxdb_log10_ppm"}
 
 _DS_TYPES: dict[str, str] = {
     "DIA-NN Report (.parquet)":     "diann_report",
@@ -189,6 +190,22 @@ def _apply_lfq_filter(ds):
     return ds
 
 
+def _annotate_paxdb(ds):
+    """Attach the PaxDb reference-abundance feature to protein-level datasets.
+
+    Contaminants are excluded (see ``add_paxdb_abundance``); peptide-level and
+    non-human datasets simply get an all-NaN column (or none when the reference
+    is missing), so the feature is only surfaced where it is meaningful.
+    """
+    if ds.level != "protein":
+        return ds
+    paxdb = _paxdb_ppm()
+    if paxdb.empty:
+        return ds
+    from biastracker.analysis.paxdb import add_paxdb_abundance
+    return add_paxdb_abundance(ds, paxdb)
+
+
 @st.cache_data(show_spinner=False)
 def _load(file_bytes: bytes, filename: str, ds_type: str, name: str, level: str, ph: float = 8.5):
     """Load a dataset from raw bytes. Returns (BiasDataset | None, error | None).
@@ -224,6 +241,7 @@ def _load(file_bytes: bytes, filename: str, ds_type: str, name: str, level: str,
         }
         ds = dispatch[ds_type](tmp_path)
         ds = _apply_lfq_filter(ds)
+        ds = _annotate_paxdb(ds)
         return ds, None
     except Exception as exc:
         return None, str(exc)
@@ -748,11 +766,17 @@ def tab_distributions(datasets: dict) -> None:
         st.warning("No numeric features found in the loaded datasets.")
         return
 
-    c1, c2, c3, c4 = st.columns([3, 3, 1, 1])
+    c1, c2, c3, c4, c5 = st.columns([3, 3, 1, 1, 1])
     feat   = c1.selectbox("Property", all_feats, format_func=_lbl)
     ptype  = c2.radio("Plot type", ["Histogram", "Violin", "CDF"], horizontal=True)
     rug    = c3.checkbox("Rug", value=False, help="Add a rug plot: small tick marks along the axis "
                          "showing each individual data point's position.")
+    show_sig = c5.checkbox(
+        "Sig", value=True, disabled=len(datasets) < 2,
+        help="Overlay the significance of the difference between datasets on the "
+             "plot: Mann-Whitney U for two datasets, Kruskal-Wallis for three or "
+             "more (same tests as the Compare tab).",
+    )
 
     # A log₁₀ transform is undefined for non-positive values. Forbid it entirely
     # for properties that can be negative (e.g. GRAVY, net charge) rather than
@@ -841,7 +865,45 @@ def tab_distributions(datasets: dict) -> None:
                 hoverinfo="skip",
             ))
 
+    # ── Overlay the between-dataset significance onto the plot ────────────────
+    sig_caption = None
+    if show_sig and len(datasets) >= 2:
+        from biastracker.analysis.compare import feature_significance
+        sig = feature_significance(list(datasets.values()), feat)
+        if sig is not None:
+            sig_val = sig["fdr"] if sig["fdr"] is not None else sig["p_value"]
+            stars = _sig_marker(sig_val) or "n.s."
+            line2 = f"p = {sig['p_value']:.2g}"
+            if sig["fdr"] is not None:
+                line2 += f"  ·  FDR = {sig['fdr']:.2g}"
+            line2 += f"  {stars}"
+            fig.add_annotation(
+                xref="paper", yref="paper", x=0.01, y=0.99,
+                xanchor="left", yanchor="top", align="left",
+                text=f"<b>{sig['test']}</b><br>{line2}", showarrow=False,
+                font=dict(size=12, color=_NAVY),
+                bgcolor="rgba(255,255,255,0.78)", bordercolor=_NAVY,
+                borderwidth=1, borderpad=4,
+            )
+            # For a two-dataset violin, add a classic significance bracket on top.
+            if ptype == "Violin" and sig["n_groups"] == 2:
+                fig.add_shape(type="line", xref="paper", yref="paper",
+                              x0=0.30, x1=0.70, y0=0.93, y1=0.93,
+                              line=dict(color=_NAVY, width=1))
+                for xb in (0.30, 0.70):
+                    fig.add_shape(type="line", xref="paper", yref="paper",
+                                  x0=xb, x1=xb, y0=0.90, y1=0.93,
+                                  line=dict(color=_NAVY, width=1))
+                fig.add_annotation(xref="paper", yref="paper", x=0.50, y=0.935,
+                                   xanchor="center", yanchor="bottom", text=stars,
+                                   showarrow=False, font=dict(size=13, color=_NAVY))
+            sig_caption = f"{sig['test']} between datasets · {stars}"
+        elif ptype != "CDF":
+            sig_caption = "Significance not available for this property (needs the same feature in ≥2 datasets)."
+
     st.plotly_chart(fig, use_container_width=True)
+    if sig_caption:
+        st.caption(sig_caption)
     if feat_has_nonpos:
         st.caption(f"Log₁₀ unavailable for “{_lbl(feat)}” — it has non-positive values.")
     elif logx and n_dropped:
@@ -1181,21 +1243,25 @@ def _enrichment_bar(pdf: pd.DataFrame, x_col: str, x_title: str, pos_label: str,
     st.caption(f"Red = {pos_label}, teal = {neg_label}. Showing top {len(sub)} terms.")
 
 
-def _enrichment_volcano(vdf: pd.DataFrame, sig_threshold: float, effect_label: str,
-                        n_labels: int = 8) -> None:
-    """Volcano plot of enrichment terms: effect size (x) vs −log₁₀ FDR (y).
+def _enrichment_volcano(vdf: pd.DataFrame, effect_label: str, n_labels: int = 8) -> None:
+    """Volcano plot of enrichment terms: effect size (x) vs −log₁₀ significance (y).
 
     *vdf* must be the output of
-    :func:`biastracker.analysis.enrichment.prepare_enrichment_volcano_data`.
+    :func:`biastracker.analysis.enrichment.prepare_enrichment_volcano_data`; the
+    significance statistic, threshold, and axis label are read from it.
     """
     if vdf.empty:
         st.info("No terms to plot.")
         return
 
-    plot = vdf.dropna(subset=["effect", "neg_log10_fdr"]).copy()
+    plot = vdf.dropna(subset=["effect", "neg_log10_sig"]).copy()
     if plot.empty:
-        st.info("No terms with a finite effect size and FDR to plot.")
+        st.info("No terms with a finite effect size and significance to plot.")
         return
+
+    metric = plot["significance_metric"].iloc[0]
+    sig_threshold = float(plot["sig_threshold"].iloc[0])
+    sig_lbl = "p" if metric == "p_value" else "FDR"
 
     # Three visual groups: significant up (red), significant down (teal),
     # non-significant (grey). This encodes direction *and* significance.
@@ -1213,14 +1279,15 @@ def _enrichment_volcano(vdf: pd.DataFrame, sig_threshold: float, effect_label: s
         if sub.empty:
             continue
         p_txt = sub["p_value"] if "p_value" in sub.columns else pd.Series([np.nan] * len(sub))
+        fdr_txt = sub["fdr"] if "fdr" in sub.columns else pd.Series([np.nan] * len(sub))
         size_txt = sub["set_size"] if "set_size" in sub.columns else pd.Series([np.nan] * len(sub))
         customdata = np.column_stack([
-            sub["fdr"].to_numpy(),
+            fdr_txt.to_numpy(),
             p_txt.to_numpy(),
             size_txt.to_numpy(),
         ])
         fig.add_trace(go.Scatter(
-            x=sub["effect"], y=sub["neg_log10_fdr"],
+            x=sub["effect"], y=sub["neg_log10_sig"],
             mode="markers", name=grp,
             marker=dict(color=color, size=8, opacity=0.75,
                         line=dict(width=0.5, color="white")),
@@ -1238,15 +1305,15 @@ def _enrichment_volcano(vdf: pd.DataFrame, sig_threshold: float, effect_label: s
     # Reference lines: significance threshold and effect = 0.
     y_thr = -np.log10(max(sig_threshold, 1e-300))
     fig.add_hline(y=y_thr, line_dash="dash", line_color=_NAVY, line_width=1,
-                  annotation_text=f"FDR = {sig_threshold:g}", annotation_position="top left")
+                  annotation_text=f"{sig_lbl} = {sig_threshold:g}", annotation_position="top left")
     fig.add_vline(x=0, line_dash="dash", line_color=_NAVY, line_width=1)
 
     # Label a few of the most significant terms, preferring significant ones.
-    labelled = plot.sort_values("neg_log10_fdr", ascending=False)
+    labelled = plot.sort_values("neg_log10_sig", ascending=False)
     labelled = pd.concat([labelled[labelled["significant"]], labelled[~labelled["significant"]]])
     for _, r in labelled.head(int(n_labels)).iterrows():
         fig.add_annotation(
-            x=r["effect"], y=r["neg_log10_fdr"], text=_trunc(str(r["term_name"]), 28),
+            x=r["effect"], y=r["neg_log10_sig"], text=_trunc(str(r["term_name"]), 28),
             showarrow=True, arrowhead=0, arrowwidth=0.6, arrowcolor="#999",
             font=dict(size=10, color=_NAVY), ax=0, ay=-14,
         )
@@ -1254,7 +1321,7 @@ def _enrichment_volcano(vdf: pd.DataFrame, sig_threshold: float, effect_label: s
     fig.update_layout(
         template="plotly_white",
         xaxis_title=effect_label,
-        yaxis_title="−log₁₀ FDR",
+        yaxis_title=f"−log₁₀ {sig_lbl}",
         height=520,
         legend=dict(orientation="h", y=1.06, x=1, xanchor="right"),
         margin=dict(l=60, r=20, t=30, b=50),
@@ -1264,59 +1331,8 @@ def _enrichment_volcano(vdf: pd.DataFrame, sig_threshold: float, effect_label: s
     n_sig = int(plot["significant"].sum())
     st.caption(
         f"Red = enriched at the high-score (top) end, teal = enriched at the low-score "
-        f"(bottom) end, grey = not significant. {n_sig:,} term(s) at FDR ≤ {sig_threshold:g}."
+        f"(bottom) end, grey = not significant. {n_sig:,} term(s) at {sig_lbl} ≤ {sig_threshold:g}."
     )
-
-
-def _paxdb_scatter(res, dataset_name: str, trend: bool = True) -> None:
-    """Scatter of dataset mean abundance vs PaxDb abundance, with Spearman ρ.
-
-    *res* is a
-    :class:`biastracker.analysis.paxdb.PaxDbCorrelationResult`.
-    """
-    m = res.matched
-    if m.empty:
-        st.info("No proteins could be matched to PaxDb for this dataset.")
-        return
-
-    title = f"ρ = {res.rho:.3f}" if np.isfinite(res.rho) else "ρ = n/a"
-    title += f"  ·  n = {res.n_used:,} matched proteins"
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=m["dataset_abundance"], y=m["paxdb_abundance"],
-        mode="markers",
-        marker=dict(color=_dataset_color(dataset_name), size=6, opacity=0.55,
-                    line=dict(width=0.3, color="white")),
-        text=m["primary_id"].astype(str),
-        hovertemplate=("<b>%{text}</b><br>"
-                       f"{res.x_label}: %{{x:.3f}}<br>"
-                       f"{res.y_label}: %{{y:.3f}}<extra></extra>"),
-        name="proteins",
-    ))
-
-    # Optional visual trend line (least-squares). This is a display aid only —
-    # the reported statistic is the rank-based Spearman ρ, not this OLS fit.
-    if trend and len(m) >= 2:
-        x = m["dataset_abundance"].to_numpy(dtype=float)
-        y = m["paxdb_abundance"].to_numpy(dtype=float)
-        slope, intercept = np.polyfit(x, y, 1)
-        xs = np.array([x.min(), x.max()])
-        fig.add_trace(go.Scatter(
-            x=xs, y=slope * xs + intercept, mode="lines",
-            line=dict(color=_NAVY, width=1.5, dash="dash"),
-            name="trend (OLS)", hoverinfo="skip",
-        ))
-
-    fig.update_layout(
-        template="plotly_white",
-        title=dict(text=title, x=0.5, font=dict(size=14, color=_NAVY)),
-        xaxis_title=res.x_label, yaxis_title=res.y_label,
-        height=460, margin=dict(l=60, r=20, t=50, b=50),
-        font=dict(color=_NAVY, size=12),
-        showlegend=True, legend=dict(orientation="h", y=1.02, x=1, xanchor="right"),
-    )
-    st.plotly_chart(fig, use_container_width=True)
 
 
 def _run_ora_ui(datasets: dict, annotations) -> None:
@@ -1444,7 +1460,8 @@ def _run_ora_ui(datasets: dict, annotations) -> None:
 
 def _run_fgsea_ui(datasets: dict, annotations) -> None:
     from biastracker.analysis.enrichment import (
-        DEFAULT_SIG_THRESHOLD, prepare_enrichment_volcano_data, run_fgsea,
+        DEFAULT_SIGNIFICANCE_PRESET, SIGNIFICANCE_PRESETS,
+        prepare_enrichment_volcano_data, run_fgsea,
     )
     from biastracker.analysis.ranking import (
         CUSTOM, FGSEA_RANKING_METHODS, MEAN_EXPRESSION,
@@ -1536,9 +1553,6 @@ def _run_fgsea_ui(datasets: dict, annotations) -> None:
             st.session_state["gsea_res"]   = res
             st.session_state["gsea_label"] = f"{ds_name} ranked by {metric_lbl}"
 
-    # ── PaxDb abundance-agreement panel (independent of the fGSEA run) ─────────
-    _paxdb_agreement_panel(ds, ds_name)
-
     if "gsea_res" not in st.session_state:
         return
     res: pd.DataFrame = st.session_state["gsea_res"]
@@ -1549,17 +1563,28 @@ def _run_fgsea_ui(datasets: dict, annotations) -> None:
                    "annotation IDs match your dataset IDs.")
         return
 
-    n_sig = int((res["fdr"] < DEFAULT_SIG_THRESHOLD).sum())
-    st.caption(f"{len(res):,} gene sets tested · {n_sig:,} significant at "
-               f"FDR < {DEFAULT_SIG_THRESHOLD:g}")
+    sc1, sc2 = st.columns([2, 2])
+    crit = sc1.selectbox(
+        "Significance criterion", list(SIGNIFICANCE_PRESETS),
+        index=list(SIGNIFICANCE_PRESETS).index(DEFAULT_SIGNIFICANCE_PRESET),
+        key="gsea_sig",
+        help="Nominal p is the per-term permutation p-value; FDR is the "
+             "Benjamini-Hochberg adjusted value. 0.25 is the conventional GSEA "
+             "FDR cutoff.",
+    )
+    sig_metric, sig_thr = SIGNIFICANCE_PRESETS[crit]
+    n_sig = int((pd.to_numeric(res[sig_metric], errors="coerce") <= sig_thr).sum())
+    st.caption(f"{len(res):,} gene sets tested · {n_sig:,} significant at {crit}")
 
     # Volcano is the default view; the bar chart remains available.
-    view = st.radio("Plot", ["Volcano", "Bar chart"], horizontal=True, key="gsea_plot")
+    view = sc2.radio("Plot", ["Volcano", "Bar chart"], horizontal=True, key="gsea_plot")
     if view == "Volcano":
-        vdf = prepare_enrichment_volcano_data(res, sig_threshold=DEFAULT_SIG_THRESHOLD)
+        vdf = prepare_enrichment_volcano_data(
+            res, significance_metric=sig_metric, sig_threshold=sig_thr,
+        )
         effect_lbl = "NES" if vdf["effect_col"].iloc[0] == "nes" else "Enrichment score (ES)"
         n_labels = st.slider("Terms to label", 0, 20, 8, key="gsea_labels")
-        _enrichment_volcano(vdf, DEFAULT_SIG_THRESHOLD, effect_lbl, n_labels=n_labels)
+        _enrichment_volcano(vdf, effect_lbl, n_labels=n_labels)
     else:
         _enrichment_bar(res.copy(), "nes", "Normalized Enrichment Score (NES)",
                         pos_label="high-score end", neg_label="low-score end")
@@ -1582,37 +1607,94 @@ def _run_fgsea_ui(datasets: dict, annotations) -> None:
     )
 
 
-def _paxdb_agreement_panel(ds, ds_name: str) -> None:
-    """PaxDb abundance-agreement panel: Spearman ρ + scatter vs the reference."""
-    from biastracker.analysis.paxdb import paxdb_abundance_agreement
+def _dataset_union_ids(datasets: dict) -> set[str]:
+    """Union of accession IDs across all loaded datasets."""
+    ids: set[str] = set()
+    for ds in datasets.values():
+        ids |= set(ds.table[ds.id_col].dropna().astype(str))
+    return ids
 
-    paxdb = _paxdb_ppm()
-    with st.expander("PaxDb abundance agreement (mean LFQ vs reference)", expanded=False):
-        if paxdb.empty:
-            st.caption("PaxDb reference table not available.")
-            return
-        st.caption(
-            "Spearman rank correlation between this dataset's mean-LFQ abundance and "
-            "the PaxDb reference proteome. It checks whether proteins that are abundant "
-            "here are generally abundant in the reference (rank agreement, not equality)."
-        )
-        if not st.button("▶  Compute PaxDb agreement", key=f"paxdb_run_{ds_name}"):
-            return
-        try:
-            res = paxdb_abundance_agreement(ds.table, id_col=ds.id_col, paxdb_ppm=paxdb)
-        except ValueError as exc:
-            st.warning(str(exc))
-            return
-        if res.message:
-            st.warning(res.message)
-        else:
-            st.caption(
-                f"ρ = {res.rho:.3f}  (p = {res.p_value:.2g})  ·  "
-                f"{res.n_used:,} proteins used  ·  matched "
-                f"{res.n_matched:,}/{res.n_input:,} ({100 * res.matched_fraction:.0f}%)"
-                + (f"  ·  {res.n_excluded:,} pair(s) excluded" if res.n_excluded else "")
-            )
-        _paxdb_scatter(res, ds_name)
+
+def _cached_api_annotation(key, builder):
+    """Fetch-on-click cache for live API annotation sets.
+
+    *builder* is a zero-arg callable returning an AnnotationSet. The result is
+    stored in ``st.session_state['api_ann']`` keyed by *key* so it survives the
+    reruns triggered by later widgets (method choice, ORA/fgsea controls) without
+    re-hitting the network. Returns the AnnotationSet, or ``None`` until fetched.
+    """
+    cached = st.session_state.get("api_ann")
+    if cached and cached[0] == key:
+        return cached[1]
+    if st.button("▶  Fetch annotations", key="api_ann_fetch"):
+        with st.spinner("Querying the annotation service… (cached after the first run)"):
+            try:
+                ann = builder()
+            except Exception as exc:
+                st.error(f"Annotation service error: {str(exc)[:300]}")
+                return None
+        st.session_state["api_ann"] = (key, ann)
+        return ann
+    st.info("Pick your options above, then click **Fetch annotations**.")
+    return None
+
+
+def _panther_api_annotation(datasets: dict):
+    """UI + fetch for PANTHER live-API annotations. Returns AnnotationSet | None."""
+    from biastracker.annotations.panther import PANTHER_DATASETS, load_panther_api_annotations
+
+    ids = _dataset_union_ids(datasets)
+    st.caption(f"Annotates the {len(ids):,} UniProt accessions across your loaded "
+               "datasets by querying PANTHER.")
+    pc1, pc2 = st.columns([3, 1])
+    cats = pc1.multiselect(
+        "PANTHER datasets", list(PANTHER_DATASETS),
+        default=["go_bp", "go_cc", "go_mf"], key="panther_cats",
+        help="GO aspects, PANTHER GO-slim, protein class, and pathway sets.",
+    )
+    organism = pc2.text_input("Organism (taxon)", value="9606", key="panther_org")
+    if not cats:
+        st.warning("Select at least one PANTHER dataset.")
+        return None
+    if not ids:
+        st.warning("No accessions in the loaded datasets.")
+        return None
+
+    key = ("panther", tuple(sorted(cats)), organism.strip(), hash(frozenset(ids)))
+    return _cached_api_annotation(
+        key,
+        lambda: load_panther_api_annotations(
+            sorted(ids), organism=organism.strip() or "9606", categories=cats,
+        ),
+    )
+
+
+def _uniprot_go_annotation(datasets: dict):
+    """UI + fetch for UniProt GO live-API annotations. Returns AnnotationSet | None."""
+    from biastracker.annotations.uniprot_go import GO_ASPECTS, load_uniprot_go_annotations
+
+    ids = _dataset_union_ids(datasets)
+    st.caption(f"Annotates the {len(ids):,} UniProt accessions across your loaded "
+               "datasets with GO terms from UniProt.")
+    aspect_labels = {
+        "P": "Biological process", "C": "Cellular component", "F": "Molecular function",
+    }
+    chosen = st.multiselect(
+        "GO aspects", list(GO_ASPECTS), default=list(GO_ASPECTS),
+        format_func=lambda a: aspect_labels.get(a, a), key="uniprot_go_aspects",
+    )
+    if not chosen:
+        st.warning("Select at least one GO aspect.")
+        return None
+    if not ids:
+        st.warning("No accessions in the loaded datasets.")
+        return None
+
+    key = ("uniprot_go", tuple(sorted(chosen)), hash(frozenset(ids)))
+    return _cached_api_annotation(
+        key,
+        lambda: load_uniprot_go_annotations(sorted(ids), aspects=chosen),
+    )
 
 
 def tab_enrichment(datasets: dict) -> None:
@@ -1624,18 +1706,28 @@ def tab_enrichment(datasets: dict) -> None:
     st.markdown("**1 · Choose an annotation / gene-set**")
     source = st.radio(
         "Annotation source",
-        ["Built-in", "Upload file"],
+        ["Built-in", "PANTHER (live API)", "UniProt GO (live API)", "Upload file"],
         horizontal=True,
         help="Built-in: bundled UniProt-keyed sets (Contaminants DB, HPA "
-             "subcellular location). Upload: your own GMT or long table.",
+             "subcellular location). PANTHER / UniProt GO: fetch functional terms "
+             "live for your proteins. Upload: your own GMT or long table.",
     )
 
+    ann = None
     if source == "Built-in":
         choice = st.selectbox("Built-in set", list(_BUILTIN_ANNOTATIONS), key="builtin_ann")
         rel_path, src_tag = _BUILTIN_ANNOTATIONS[choice]
         ann, err = _load_builtin_annotation(rel_path, src_tag)
         if err:
             st.error(f"Could not load '{choice}': {err[:300]}")
+            return
+    elif source == "PANTHER (live API)":
+        ann = _panther_api_annotation(datasets)
+        if ann is None:
+            return
+    elif source == "UniProt GO (live API)":
+        ann = _uniprot_go_annotation(datasets)
+        if ann is None:
             return
     else:
         ac1, ac2 = st.columns([1, 2])
@@ -1669,6 +1761,10 @@ def tab_enrichment(datasets: dict) -> None:
         if err:
             st.error(f"Annotation load error: {err[:300]}")
             return
+    if ann is None or ann.table.empty:
+        st.warning("No annotations available for your proteins. Try different "
+                   "categories / aspects, or another source.")
+        return
     n_terms = ann.table[ann.term_col].nunique()
     n_ids   = ann.table[ann.id_col].nunique()
     st.success(f"✓ {n_terms:,} terms · {n_ids:,} unique IDs")

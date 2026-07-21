@@ -35,9 +35,18 @@ biastracker run examples/ghost_proteome_config.yaml
 BiasTracker can use several annotation sources for enrichment analysis:
 
 - The PANTHER API is used for GO biological process, GO cellular component, GO molecular function, PANTHER GO-slim, protein class, PANTHER pathway, and Reactome pathway annotations.
+- The UniProt API (`annotations.uniprot_go`) fetches GO biological-process / cellular-component / molecular-function terms directly for a set of UniProt accessions and returns them as a long-format annotation set.
 - The HPA `subcellular_location.tsv.zip` download is used for subcellular location annotations.
 - HPA UMAP and CZ Biohub UMAP annotation workflows are intentionally not implemented yet.
 - UniProt ID mapping is used when HPA Ensembl gene IDs need to match `primary_id` values from UniProt-based protein tables.
+
+In the app's **Enrichment** tab, functional terms can be fetched live for the
+proteins in your loaded datasets before running ORA/fGSEA: choose **PANTHER
+(live API)** (pick GO/pathway/protein-class datasets) or **UniProt GO (live
+API)** (pick GO aspects). Both annotate the union of accessions across the
+loaded datasets, cache the result, and feed straight into ORA and fGSEA. The
+existing **Built-in** (Contaminants DB, HPA) and **Upload file** (GMT / long
+table) sources remain available.
 
 BiasTracker protein tables usually use UniProt accessions, especially when they come from `protperties`. HPA subcellular annotations use Ensembl gene IDs in the `Gene` column. When combining HPA annotations with `protperties` protein tables, use `map_to_uniprot: true` so the HPA rows are normalized to UniProt accessions before enrichment.
 
@@ -155,20 +164,37 @@ The app narrows the fGSEA ranking to two scientifically meaningful choices
 
 Ranking handling: values are numerically coerced; missing/non-numeric/infinite
 values are dropped; duplicate accessions collapse to their **maximum**; ties keep
-input order (deterministic); the final ranking is sorted descending.
+input order (deterministic); the final ranking is sorted descending. Rows flagged
+`is_contaminant` are **excluded** from the ranking by default (contaminants are
+kept ID-only in the dataset for the contaminant ORA, but should not distort the
+abundance ranking).
 
-**PaxDb abundance agreement.** PaxDb is no longer a ranking option; instead the
-_PaxDb abundance agreement_ panel computes a **Spearman rank correlation** between
-the dataset's mean-LFQ abundance and the PaxDb reference proteome (both log₁₀,
-non-positive values dropped). Spearman assesses whether the proteins that are
-abundant in your data are generally abundant in the reference (rank agreement),
-**not** absolute equality. The panel reports ρ, p-value, the number of matched
-proteins, and how many were excluded, alongside a scatter (`primary_id` on hover;
-the dashed line is a visual OLS trend, not the basis of the statistic).
+**PaxDb reference abundance.** PaxDb is treated as **just another per-protein
+metric**: on load, protein-level datasets get a `paxdb_log10_ppm` column
+(`analysis.paxdb.add_paxdb_abundance`) holding the log₁₀ PaxDb ppm matched by
+accession (non-positive / unmatched → NaN, contaminants excluded). It therefore
+appears in the **Distributions** and **Compare** tabs with the usual descriptive
+statistics, exactly like the physicochemical features — there is no separate
+correlation panel.
 
 **Volcano plot.** Enrichment results default to a volcano plot — effect size
-(NES, or ES as a fallback) on the x-axis versus `−log10(FDR)` on the y-axis, with
-a significance line at the FDR threshold (default 0.05) and a vertical line at
-effect = 0. FDR is floored before the log so `FDR == 0` stays finite, and the
-original FDR is preserved in the hover text. The previous bar chart remains
-available via the plot selector.
+(NES, or ES as a fallback) on the x-axis versus `−log10` of the chosen
+significance statistic on the y-axis, with a significance line at the threshold
+and a vertical line at effect = 0. A **significance criterion** selector offers
+*nominal p ≤ 0.05*, *FDR ≤ 0.05*, and *FDR ≤ 0.25* (the conventional GSEA
+cutoff); it drives the y-axis, the reference line, the point colouring, and the
+"N significant" count. The statistic is floored before the log so a value of 0
+stays finite, and both p and FDR are preserved in the hover text. The previous
+bar chart remains available via the plot selector.
+
+### Significance on the Distributions tab
+
+With two or more datasets loaded, the **Distributions** tab overlays the
+significance of the between-dataset difference for the selected property directly
+on the plot (toggle: *Sig*). It reuses the same tests as the Compare tab
+(`analysis.compare.feature_significance`): **Mann-Whitney U** for two datasets,
+**Kruskal-Wallis** for three or more. The annotation shows the test, nominal
+`p`, and — for standard panel features — the panel-corrected `FDR` (matching the
+Compare tab) plus a significance marker (`**` < 0.05, `*` < 0.1, else `n.s.`);
+two-dataset violin plots also get a significance bracket. Features outside the
+standard panel (e.g. `paxdb_log10_ppm`) show the nominal `p` only.
