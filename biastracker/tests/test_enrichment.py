@@ -21,38 +21,51 @@ from biastracker.analysis.enrichment import (
 
 def _fgsea_like(**cols) -> pd.DataFrame:
     base = {"term_name": ["T1", "T2", "T3"], "nes": [2.0, -1.5, 0.5],
-            "fdr": [0.001, 0.2, 0.0]}
+            "p_value": [0.0005, 0.15, 0.02], "fdr": [0.001, 0.2, 0.0]}
     base.update(cols)
     return pd.DataFrame(base)
 
 
-def test_volcano_neg_log10_fdr_and_direction():
+def test_volcano_neg_log10_sig_and_direction():
     v = prepare_enrichment_volcano_data(_fgsea_like())
-    # -log10 of 0.001 == 3
-    assert np.isclose(v.loc[0, "neg_log10_fdr"], 3.0)
+    # default metric is FDR: -log10 of 0.001 == 3
+    assert np.isclose(v.loc[0, "neg_log10_sig"], 3.0)
     assert v.loc[0, "direction"] == "positive"
     assert v.loc[1, "direction"] == "negative"
     assert v.loc[0, "effect_col"] == "nes"
+    assert v.loc[0, "significance_metric"] == "fdr"
 
 
 def test_volcano_fdr_zero_is_finite():
     v = prepare_enrichment_volcano_data(_fgsea_like())
     # FDR == 0 (row 2) must not become +inf
-    assert np.isfinite(v.loc[2, "neg_log10_fdr"])
-    assert v.loc[2, "neg_log10_fdr"] > 0
+    assert np.isfinite(v.loc[2, "neg_log10_sig"])
+    assert v.loc[2, "neg_log10_sig"] > 0
 
 
-def test_volcano_missing_fdr_is_nan_and_not_significant():
+def test_volcano_missing_stat_is_nan_and_not_significant():
     v = prepare_enrichment_volcano_data(_fgsea_like(fdr=[0.001, np.nan, 0.5]))
-    assert np.isnan(v.loc[1, "neg_log10_fdr"])
+    assert np.isnan(v.loc[1, "neg_log10_sig"])
     assert not bool(v.loc[1, "significant"])
 
 
-def test_volcano_significance_threshold():
-    v = prepare_enrichment_volcano_data(_fgsea_like(fdr=[0.01, 0.2, 0.05]), sig_threshold=0.05)
-    assert bool(v.loc[0, "significant"]) is True     # 0.01 <= 0.05
-    assert bool(v.loc[1, "significant"]) is False    # 0.2
-    assert bool(v.loc[2, "significant"]) is True     # 0.05 == threshold
+def test_volcano_fdr_threshold_025():
+    v = prepare_enrichment_volcano_data(_fgsea_like(fdr=[0.01, 0.2, 0.3]), sig_threshold=0.25)
+    assert bool(v.loc[0, "significant"]) is True     # 0.01 <= 0.25
+    assert bool(v.loc[1, "significant"]) is True     # 0.20 <= 0.25
+    assert bool(v.loc[2, "significant"]) is False    # 0.30 > 0.25
+
+
+def test_volcano_pvalue_criterion():
+    # Using nominal p ≤ 0.05: y-axis and significance follow p_value, not fdr.
+    v = prepare_enrichment_volcano_data(
+        _fgsea_like(), significance_metric="p_value", sig_threshold=0.05,
+    )
+    assert v.loc[0, "significance_metric"] == "p_value"
+    assert np.isclose(v.loc[0, "neg_log10_sig"], -np.log10(0.0005))
+    assert bool(v.loc[0, "significant"]) is True     # p 0.0005
+    assert bool(v.loc[1, "significant"]) is False    # p 0.15
+    assert bool(v.loc[2, "significant"]) is True     # p 0.02
 
 
 def test_volcano_falls_back_to_es_when_no_nes():
@@ -62,6 +75,12 @@ def test_volcano_falls_back_to_es_when_no_nes():
     assert v.loc[0, "effect"] == 1.0
 
 
+def test_volcano_missing_significance_metric_raises():
+    df = pd.DataFrame({"term_name": ["T1"], "nes": [1.0], "fdr": [0.01]})
+    with pytest.raises(ValueError, match="significance_metric"):
+        prepare_enrichment_volcano_data(df, significance_metric="p_value")
+
+
 def test_volcano_no_effect_column_raises():
     df = pd.DataFrame({"term_name": ["T1"], "fdr": [0.01]})
     with pytest.raises(ValueError, match="No effect-size column"):
@@ -69,10 +88,11 @@ def test_volcano_no_effect_column_raises():
 
 
 def test_volcano_empty_result_keeps_schema():
-    empty = pd.DataFrame(columns=["term_name", "nes", "fdr"])
+    empty = pd.DataFrame(columns=["term_name", "nes", "p_value", "fdr"])
     v = prepare_enrichment_volcano_data(empty)
     assert v.empty
-    for col in ("effect", "neg_log10_fdr", "direction", "significant"):
+    for col in ("effect", "neg_log10_sig", "direction", "significant",
+                "significance_metric", "sig_threshold"):
         assert col in v.columns
 
 

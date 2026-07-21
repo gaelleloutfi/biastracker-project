@@ -60,18 +60,32 @@ _DATASET_FGSEA_COLS = ["dataset", "score_col"] + _FGSEA_COLS
 
 # Default FDR significance threshold shared across enrichment visualisations.
 DEFAULT_SIG_THRESHOLD = 0.05
-# Floor applied to FDR before -log10 so FDR == 0 does not become +inf.
+# Floor applied to the significance statistic before -log10 so 0 does not
+# become +inf.
 _FDR_FLOOR = 1e-300
+
+# Selectable significance criteria: label -> (statistic column, threshold).
+# 0.25 is the conventional GSEA FDR cutoff.
+SIGNIFICANCE_PRESETS: dict[str, tuple[str, float]] = {
+    "Nominal p ≤ 0.05": ("p_value", 0.05),
+    "FDR ≤ 0.05": ("fdr", 0.05),
+    "FDR ≤ 0.25": ("fdr", 0.25),
+}
+DEFAULT_SIGNIFICANCE_PRESET = "FDR ≤ 0.05"
+
 # Extra columns added by prepare_enrichment_volcano_data.
-_VOLCANO_EXTRA_COLS = ["effect", "neg_log10_fdr", "direction", "significant", "effect_col"]
+_VOLCANO_EXTRA_COLS = [
+    "effect", "neg_log10_sig", "direction", "significant",
+    "effect_col", "significance_metric", "sig_threshold",
+]
 
 
 def prepare_enrichment_volcano_data(
     result: pd.DataFrame,
     effect_col: str | None = None,
-    fdr_col: str = "fdr",
+    significance_metric: str = "fdr",
     sig_threshold: float = DEFAULT_SIG_THRESHOLD,
-    fdr_floor: float = _FDR_FLOOR,
+    sig_floor: float = _FDR_FLOOR,
 ) -> pd.DataFrame:
     """Augment an fGSEA (or ORA) result table with volcano-plot coordinates.
 
@@ -80,13 +94,15 @@ def prepare_enrichment_volcano_data(
     * ``effect`` — the signed effect size. When *effect_col* is ``None`` it is
       chosen as ``"nes"`` if present, otherwise ``"es"`` (fallback); pass an
       explicit column to override.
-    * ``neg_log10_fdr`` — ``-log10(FDR)`` with FDR clipped to *fdr_floor* so
-      ``FDR == 0`` yields a large finite value instead of ``+inf``. Rows with a
-      missing FDR keep ``NaN`` here. The original FDR column is left untouched
-      for hover text.
+    * ``neg_log10_sig`` — ``-log10`` of the chosen significance statistic
+      (*significance_metric*, ``"fdr"`` or ``"p_value"``), clipped to *sig_floor*
+      so a value of 0 yields a large finite number instead of ``+inf``. Rows with
+      a missing statistic keep ``NaN`` here. The original ``p_value`` / ``fdr``
+      columns are left untouched for hover text.
     * ``direction`` — ``"positive"`` (effect ≥ 0) or ``"negative"``.
-    * ``significant`` — ``FDR <= sig_threshold`` (missing FDR → ``False``).
-    * ``effect_col`` — the name of the effect column used.
+    * ``significant`` — ``statistic <= sig_threshold`` (missing → ``False``).
+    * ``effect_col`` / ``significance_metric`` / ``sig_threshold`` — the choices
+      used, so plotting code can label axes and reference lines.
 
     An empty *result* returns an empty frame carrying the extra columns so
     callers can rely on the schema.
@@ -94,7 +110,8 @@ def prepare_enrichment_volcano_data(
     Raises
     ------
     ValueError
-        If no usable effect column can be found, or the FDR column is missing.
+        If no usable effect column can be found, or *significance_metric* is
+        missing from *result*.
     """
     if effect_col is None:
         effect_col = "nes" if "nes" in result.columns else (
@@ -107,24 +124,28 @@ def prepare_enrichment_volcano_data(
             )
     elif effect_col not in result.columns:
         raise ValueError(f"effect_col '{effect_col}' not found in result columns.")
-    if fdr_col not in result.columns:
-        raise ValueError(f"fdr_col '{fdr_col}' not found in result columns.")
+    if significance_metric not in result.columns:
+        raise ValueError(
+            f"significance_metric '{significance_metric}' not found in result columns."
+        )
 
     out = result.copy()
     if out.empty:
         for col in _VOLCANO_EXTRA_COLS:
-            out[col] = pd.Series(dtype="object" if col == "direction" else "float64")
-        out["effect_col"] = pd.Series(dtype="object")
+            out[col] = pd.Series(dtype="object" if col in {"direction", "effect_col",
+                                 "significance_metric"} else "float64")
         return out
 
-    fdr = pd.to_numeric(out[fdr_col], errors="coerce")
+    stat = pd.to_numeric(out[significance_metric], errors="coerce")
     out["effect"] = pd.to_numeric(out[effect_col], errors="coerce")
-    out["neg_log10_fdr"] = -np.log10(fdr.clip(lower=fdr_floor))
-    # A missing FDR must not masquerade as significant or as a real y-coordinate.
-    out.loc[fdr.isna(), "neg_log10_fdr"] = np.nan
+    out["neg_log10_sig"] = -np.log10(stat.clip(lower=sig_floor))
+    # A missing statistic must not masquerade as significant or a real y-coord.
+    out.loc[stat.isna(), "neg_log10_sig"] = np.nan
     out["direction"] = np.where(out["effect"] >= 0, "positive", "negative")
-    out["significant"] = (fdr <= sig_threshold).fillna(False)
+    out["significant"] = (stat <= sig_threshold).fillna(False)
     out["effect_col"] = effect_col
+    out["significance_metric"] = significance_metric
+    out["sig_threshold"] = sig_threshold
     return out
 
 
