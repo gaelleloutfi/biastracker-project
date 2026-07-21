@@ -3,7 +3,7 @@ import pandas as pd
 from typing import List, Optional
 
 from biastracker.dataset import BiasDataset
-from biastracker.preprocessing import select_numeric_features
+from biastracker.preprocessing import DEFAULT_FEATURES, select_numeric_features
 from biastracker.stats import (
     mannwhitney_u,
     ks_test,
@@ -441,3 +441,63 @@ def compare_multiple_datasets(
     result["comparison_type"] = "between_datasets"
 
     return result[_MULTI_DATASET_COLS].reset_index(drop=True)
+
+
+def feature_significance(
+    datasets: List[BiasDataset],
+    feature: str,
+    correction: str = "fdr_bh",
+) -> Optional[dict]:
+    """Significance of a single *feature* across datasets, for on-plot annotation.
+
+    Returns the test result for one feature so a distribution plot can be
+    annotated with its significance. Two datasets → Mann-Whitney U; three or more
+    → a Kruskal-Wallis omnibus test.
+
+    The FDR is only meaningful relative to a family of tests: when *feature* is
+    part of the standard BiasTracker feature panel, the whole panel is tested so
+    the returned ``fdr`` matches the Compare tab exactly. For a feature outside
+    the panel (e.g. ``paxdb_log10_ppm``) only the nominal ``p_value`` is returned
+    and ``fdr`` is ``None``.
+
+    Returns ``None`` (no annotation) when fewer than two datasets carry the
+    feature, when dataset names are not distinct, or when their levels differ.
+    """
+    ds_list = [d for d in datasets if feature in d.table.columns]
+    names = [d.name for d in ds_list]
+    if len(ds_list) < 2 or len(set(names)) != len(names):
+        return None
+    if len({d.level for d in ds_list}) > 1:
+        return None
+
+    in_panel = feature in DEFAULT_FEATURES
+    features_arg = None if in_panel else [feature]
+
+    try:
+        if len(ds_list) == 2:
+            res = compare_datasets(ds_list[0], ds_list[1], features=features_arg, correction=correction)
+            row = res[res["feature"] == feature]
+            if row.empty:
+                return None
+            r = row.iloc[0]
+            return {
+                "test": "Mann-Whitney U",
+                "p_value": float(r["mannwhitney_p"]),
+                "fdr": float(r["mannwhitney_fdr"]) if in_panel else None,
+                "n_groups": 2,
+                "groups": names,
+            }
+        res = compare_multiple_datasets(ds_list, features=features_arg, correction=correction)
+        row = res[res["feature"] == feature]
+        if row.empty:
+            return None
+        r = row.iloc[0]
+        return {
+            "test": "Kruskal-Wallis",
+            "p_value": float(r["kruskal_p"]),
+            "fdr": float(r["kruskal_fdr"]) if in_panel else None,
+            "n_groups": len(ds_list),
+            "groups": names,
+        }
+    except ValueError:
+        return None

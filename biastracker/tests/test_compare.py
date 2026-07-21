@@ -2,7 +2,71 @@ import numpy as np
 import pandas as pd
 import pytest
 from biastracker.dataset import BiasDataset
-from biastracker.analysis.compare import compare_groups, compare_multiple_groups, compare_datasets
+from biastracker.analysis.compare import (
+    compare_groups,
+    compare_multiple_groups,
+    compare_datasets,
+    feature_significance,
+)
+
+
+def _mk(name, length_vals):
+    """Minimal protein dataset carrying a 'length' panel feature."""
+    n = len(length_vals)
+    return BiasDataset(
+        name=name,
+        table=pd.DataFrame({
+            "primary_id": [f"P{i}" for i in range(n)],
+            "level": ["protein"] * n,
+            "sequence": ["SEQ"] * n,
+            "length": list(length_vals),
+        }),
+        level="protein",
+    )
+
+
+def test_feature_significance_two_datasets_reports_p_and_fdr():
+    a = _mk("A", [10, 12, 11, 13, 10, 12])
+    b = _mk("B", [40, 42, 41, 43, 40, 44])
+    sig = feature_significance([a, b], "length")
+    assert sig["test"] == "Mann-Whitney U"
+    assert sig["n_groups"] == 2
+    assert 0.0 <= sig["p_value"] <= 1.0
+    # 'length' is in the standard panel -> FDR is reported.
+    assert sig["fdr"] is not None
+
+
+def test_feature_significance_three_datasets_kruskal():
+    a = _mk("A", [10, 11, 12, 13])
+    b = _mk("B", [40, 41, 42, 43])
+    c = _mk("C", [90, 91, 92, 93])
+    sig = feature_significance([a, b, c], "length")
+    assert sig["test"] == "Kruskal-Wallis"
+    assert sig["n_groups"] == 3
+
+
+def test_feature_significance_non_panel_feature_has_no_fdr():
+    a = _mk("A", [1, 2, 3, 4]); a.table["paxdb_log10_ppm"] = [1.0, 2.0, 3.0, 4.0]
+    b = _mk("B", [1, 2, 3, 4]); b.table["paxdb_log10_ppm"] = [5.0, 6.0, 7.0, 8.0]
+    sig = feature_significance([a, b], "paxdb_log10_ppm")
+    assert sig is not None
+    assert sig["fdr"] is None                      # outside the panel -> nominal p only
+    assert 0.0 <= sig["p_value"] <= 1.0
+
+
+def test_feature_significance_needs_two_datasets_with_feature():
+    a = _mk("A", [1, 2, 3])
+    b = _mk("B", [4, 5, 6])
+    b.table = b.table.drop(columns=["length"])     # only A has 'length'
+    assert feature_significance([a, b], "length") is None
+    assert feature_significance([a], "length") is None
+
+
+def test_feature_significance_mixed_levels_returns_none():
+    a = _mk("A", [1, 2, 3])
+    b = _mk("B", [4, 5, 6])
+    object.__setattr__(b, "level", "peptide")      # force a level mismatch
+    assert feature_significance([a, b], "length") is None
 
 
 # ---------------------------------------------------------------------------
