@@ -17,6 +17,12 @@ DEFAULT_HEADERS = {
     "Accept": "application/json",
 }
 
+# Default time-to-live for on-disk annotation caches. Cached entries older than
+# this are treated as stale and re-fetched, so reference data (GO/PANTHER) never
+# goes silently years out of date. Pass ``max_age_days=0`` to force a refresh,
+# or ``None`` to disable expiry entirely.
+DEFAULT_ANNOTATION_TTL_DAYS = 30.0
+
 
 def get_session() -> requests.Session:
     """Create a requests session with BiasTracker defaults."""
@@ -89,10 +95,25 @@ def write_json_cache(path: str | Path, data: Any) -> None:
         json.dump(data, handle, ensure_ascii=False, sort_keys=True)
 
 
-def read_json_cache(path: str | Path) -> Any | None:
-    """Read JSON cache data, returning None when the file is absent."""
+def cache_is_fresh(path: str | Path, max_age_days: float | None) -> bool:
+    """Return True if *path* exists and is within the *max_age_days* window.
+
+    ``max_age_days=None`` disables expiry (any existing file is fresh);
+    ``max_age_days=0`` forces staleness (used to bypass the cache on refresh).
+    """
     cache_path = Path(path)
     if not cache_path.exists():
+        return False
+    if max_age_days is None:
+        return True
+    age_days = (time.time() - cache_path.stat().st_mtime) / 86400.0
+    return age_days <= max_age_days
+
+
+def read_json_cache(path: str | Path, max_age_days: float | None = None) -> Any | None:
+    """Read JSON cache data, returning None when the file is absent or stale."""
+    cache_path = Path(path)
+    if not cache_is_fresh(cache_path, max_age_days):
         return None
 
     try:

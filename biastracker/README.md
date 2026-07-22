@@ -48,6 +48,15 @@ loaded datasets, cache the result, and feed straight into ORA and fGSEA. The
 existing **Built-in** (Contaminants DB, HPA) and **Upload file** (GMT / long
 table) sources remain available.
 
+**Caching & freshness.** Fetched batches are written to an on-disk cache
+(`.cache/biastracker/panther/`, `.cache/biastracker/uniprot_go/`), keyed by the
+exact accession batch plus the options (organism/datasets, or GO aspects). Cached
+entries have a time-to-live (`DEFAULT_ANNOTATION_TTL_DAYS`, 30 days): older
+entries are re-fetched automatically so reference data never goes silently out of
+date. Tick **Refresh** in the panel to ignore the cache and re-query now
+(`max_age_days=0`); the fresh result overwrites the cache. Loaders also accept
+`max_age_days=None` to disable expiry entirely.
+
 BiasTracker protein tables usually use UniProt accessions, especially when they come from `protperties`. HPA subcellular annotations use Ensembl gene IDs in the `Gene` column. When combining HPA annotations with `protperties` protein tables, use `map_to_uniprot: true` so the HPA rows are normalized to UniProt accessions before enrichment.
 
 ## PANTHER API Example

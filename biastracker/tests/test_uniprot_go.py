@@ -129,3 +129,35 @@ def test_load_uses_cache_on_second_call(tmp_path):
     ann2 = load_uniprot_go_annotations(["P12345", "Q99999"], session=sess, cache_dir=tmp_path)
     assert len(sess.calls) == 1
     assert not ann2.table.empty
+
+
+def test_refresh_bypasses_cache(tmp_path):
+    # max_age_days=0 forces a re-fetch even though a fresh cache file exists.
+    sess = DummySession([DummyResponse(_TSV), DummyResponse(_TSV)])
+    load_uniprot_go_annotations(["P12345"], session=sess, cache_dir=tmp_path)
+    load_uniprot_go_annotations(["P12345"], session=sess, cache_dir=tmp_path, max_age_days=0)
+    assert len(sess.calls) == 2          # both calls hit the network
+
+
+def test_stale_cache_is_refetched(tmp_path):
+    import os
+    sess = DummySession([DummyResponse(_TSV), DummyResponse(_TSV)])
+    load_uniprot_go_annotations(["P12345"], session=sess, cache_dir=tmp_path)
+    # Backdate the cache file to 40 days ago; default TTL is 30 days.
+    for f in tmp_path.glob("go_*.csv"):
+        old = os.stat(f).st_mtime - 40 * 86400
+        os.utime(f, (old, old))
+    load_uniprot_go_annotations(["P12345"], session=sess, cache_dir=tmp_path)
+    assert len(sess.calls) == 2          # stale entry re-fetched
+
+
+def test_ttl_none_never_expires(tmp_path):
+    import os
+    sess = DummySession([DummyResponse(_TSV)])   # only one response
+    load_uniprot_go_annotations(["P12345"], session=sess, cache_dir=tmp_path)
+    for f in tmp_path.glob("go_*.csv"):
+        old = os.stat(f).st_mtime - 999 * 86400
+        os.utime(f, (old, old))
+    # max_age_days=None disables expiry -> still a cache hit, no 2nd call.
+    load_uniprot_go_annotations(["P12345"], session=sess, cache_dir=tmp_path, max_age_days=None)
+    assert len(sess.calls) == 1

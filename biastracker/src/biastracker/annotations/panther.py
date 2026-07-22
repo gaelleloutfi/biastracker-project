@@ -9,6 +9,8 @@ from typing import Any, Optional
 import pandas as pd
 
 from biastracker.annotations._http import (
+    DEFAULT_ANNOTATION_TTL_DAYS,
+    cache_is_fresh,
     ensure_cache_dir,
     read_json_cache,
     request_with_retries,
@@ -349,9 +351,14 @@ def fetch_panther_annotations(
     batch_size: int = 500,
     cache_dir: str | Path = ".cache/biastracker/panther",
     use_cache: bool = True,
+    max_age_days: float | None = DEFAULT_ANNOTATION_TTL_DAYS,
     session=None,
 ) -> pd.DataFrame:
-    """Fetch and normalize PANTHER annotations for IDs."""
+    """Fetch and normalize PANTHER annotations for IDs.
+
+    Cached batches older than *max_age_days* are re-fetched (pass ``0`` to force a
+    refresh, ``None`` to never expire); fresh results are always written back.
+    """
     if batch_size <= 0:
         raise ValueError("batch_size must be greater than 0")
 
@@ -373,14 +380,14 @@ def fetch_panther_annotations(
             key = _batch_cache_key(batch, organism, selected_categories)
             raw_cache_file = cache_path / f"geneinfo_{key}.json"
             parsed_cache_file = cache_path / f"geneinfo_{key}.csv"
-            if parsed_cache_file.exists():
+            if cache_is_fresh(parsed_cache_file, max_age_days):
                 parsed = pd.read_csv(
                     parsed_cache_file,
                     dtype=str,
                     keep_default_na=False,
                 )
             else:
-                raw_payload = read_json_cache(raw_cache_file)
+                raw_payload = read_json_cache(raw_cache_file, max_age_days=max_age_days)
 
         if parsed is None:
             if raw_payload is None:
@@ -419,6 +426,7 @@ def load_panther_api_annotations(
     batch_size: int = 500,
     cache_dir: str | Path = ".cache/biastracker/panther",
     use_cache: bool = True,
+    max_age_days: float | None = DEFAULT_ANNOTATION_TTL_DAYS,
 ) -> AnnotationSet:
     """Fetch PANTHER API annotations and return an AnnotationSet."""
     selected_categories = categories or PANTHER_DEFAULT_CATEGORIES
@@ -429,6 +437,7 @@ def load_panther_api_annotations(
         batch_size=batch_size,
         cache_dir=cache_dir,
         use_cache=use_cache,
+        max_age_days=max_age_days,
     )
 
     return AnnotationSet(

@@ -1639,6 +1639,22 @@ def _cached_api_annotation(key, builder):
     return None
 
 
+def _annotation_max_age(refresh: bool) -> float:
+    """Cache TTL to pass to the loaders: 0 forces a refresh, else the default."""
+    from biastracker.annotations._http import DEFAULT_ANNOTATION_TTL_DAYS
+    return 0.0 if refresh else DEFAULT_ANNOTATION_TTL_DAYS
+
+
+def _cache_ttl_caption(refresh: bool) -> None:
+    from biastracker.annotations._http import DEFAULT_ANNOTATION_TTL_DAYS
+    if refresh:
+        st.caption("↻ Ignoring the on-disk cache — this fetch queries the service "
+                   "and refreshes the cache.")
+    else:
+        st.caption(f"Results are cached on disk and reused for {DEFAULT_ANNOTATION_TTL_DAYS:g} "
+                   "days; older entries are re-fetched automatically.")
+
+
 def _panther_api_annotation(datasets: dict):
     """UI + fetch for PANTHER live-API annotations. Returns AnnotationSet | None."""
     from biastracker.annotations.panther import PANTHER_DATASETS, load_panther_api_annotations
@@ -1646,13 +1662,15 @@ def _panther_api_annotation(datasets: dict):
     ids = _dataset_union_ids(datasets)
     st.caption(f"Annotates the {len(ids):,} UniProt accessions across your loaded "
                "datasets by querying PANTHER.")
-    pc1, pc2 = st.columns([3, 1])
+    pc1, pc2, pc3 = st.columns([3, 1, 1])
     cats = pc1.multiselect(
         "PANTHER datasets", list(PANTHER_DATASETS),
         default=["go_bp", "go_cc", "go_mf"], key="panther_cats",
         help="GO aspects, PANTHER GO-slim, protein class, and pathway sets.",
     )
     organism = pc2.text_input("Organism (taxon)", value="9606", key="panther_org")
+    refresh = pc3.checkbox("Refresh", value=False, key="panther_refresh",
+                           help="Ignore the on-disk cache and re-query PANTHER.")
     if not cats:
         st.warning("Select at least one PANTHER dataset.")
         return None
@@ -1660,11 +1678,14 @@ def _panther_api_annotation(datasets: dict):
         st.warning("No accessions in the loaded datasets.")
         return None
 
-    key = ("panther", tuple(sorted(cats)), organism.strip(), hash(frozenset(ids)))
+    _cache_ttl_caption(refresh)
+    max_age = _annotation_max_age(refresh)
+    key = ("panther", tuple(sorted(cats)), organism.strip(), refresh, hash(frozenset(ids)))
     return _cached_api_annotation(
         key,
         lambda: load_panther_api_annotations(
             sorted(ids), organism=organism.strip() or "9606", categories=cats,
+            max_age_days=max_age,
         ),
     )
 
@@ -1679,10 +1700,13 @@ def _uniprot_go_annotation(datasets: dict):
     aspect_labels = {
         "P": "Biological process", "C": "Cellular component", "F": "Molecular function",
     }
-    chosen = st.multiselect(
+    uc1, uc2 = st.columns([4, 1])
+    chosen = uc1.multiselect(
         "GO aspects", list(GO_ASPECTS), default=list(GO_ASPECTS),
         format_func=lambda a: aspect_labels.get(a, a), key="uniprot_go_aspects",
     )
+    refresh = uc2.checkbox("Refresh", value=False, key="uniprot_go_refresh",
+                           help="Ignore the on-disk cache and re-query UniProt.")
     if not chosen:
         st.warning("Select at least one GO aspect.")
         return None
@@ -1690,10 +1714,12 @@ def _uniprot_go_annotation(datasets: dict):
         st.warning("No accessions in the loaded datasets.")
         return None
 
-    key = ("uniprot_go", tuple(sorted(chosen)), hash(frozenset(ids)))
+    _cache_ttl_caption(refresh)
+    max_age = _annotation_max_age(refresh)
+    key = ("uniprot_go", tuple(sorted(chosen)), refresh, hash(frozenset(ids)))
     return _cached_api_annotation(
         key,
-        lambda: load_uniprot_go_annotations(sorted(ids), aspects=chosen),
+        lambda: load_uniprot_go_annotations(sorted(ids), aspects=chosen, max_age_days=max_age),
     )
 
 

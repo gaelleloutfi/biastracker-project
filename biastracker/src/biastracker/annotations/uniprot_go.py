@@ -23,6 +23,8 @@ from typing import Iterable
 import pandas as pd
 
 from biastracker.annotations._http import (
+    DEFAULT_ANNOTATION_TTL_DAYS,
+    cache_is_fresh,
     ensure_cache_dir,
     request_with_retries,
     safe_cache_key,
@@ -174,12 +176,16 @@ def load_uniprot_go_annotations(
     batch_size: int = 500,
     cache_dir: str | Path = ".cache/biastracker/uniprot_go",
     use_cache: bool = True,
+    max_age_days: float | None = DEFAULT_ANNOTATION_TTL_DAYS,
     session=None,
 ) -> AnnotationSet:
     """Fetch UniProt GO annotations for *accessions* and return an AnnotationSet.
 
     Accessions are de-duplicated and fetched in batches. Parsed batches are
     cached on disk (keyed by accession batch + aspects) so repeat runs are cheap.
+    Cached batches older than *max_age_days* are re-fetched (pass ``0`` to force a
+    refresh, ``None`` to never expire). Fresh results are always written back so
+    the cache stays current.
     """
     if batch_size <= 0:
         raise ValueError("batch_size must be greater than 0")
@@ -199,7 +205,7 @@ def load_uniprot_go_annotations(
         if cache_path is not None:
             key = safe_cache_key(",".join(sorted(batch)) + "|" + ",".join(aspects))
             cache_file = cache_path / f"go_{key}.csv"
-            if cache_file.exists():
+            if cache_is_fresh(cache_file, max_age_days):
                 parsed = pd.read_csv(cache_file, dtype=str, keep_default_na=False)
 
         if parsed is None:
