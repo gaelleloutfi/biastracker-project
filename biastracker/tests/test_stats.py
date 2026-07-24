@@ -1,9 +1,11 @@
 import numpy as np
 import pandas as pd
+import pytest
 from biastracker.stats import (
     mannwhitney_u,
     ks_test,
     kruskal_test,
+    dunn_test,
     adjust_pvalues,
     effect_direction
 )
@@ -72,6 +74,39 @@ def test_kruskal_test():
     # Only "A" is valid, so < 2 valid groups
     res_small = kruskal_test(groups_small)
     assert np.isnan(res_small["p_value"])
+
+def test_dunn_test_matches_reference():
+    """Dunn's z / raw p reproduce an independently computed reference."""
+    groups = {
+        "A": [1, 2, 3, 4, 5, 6, 7],
+        "B": [10, 11, 12, 13, 14, 15, 16],
+        "C": [1, 3, 5, 7, 9, 11, 13],
+    }
+    out = dunn_test(groups, correction="bonferroni")
+
+    assert len(out) == 3  # 3 unordered pairs
+    row = out[(out["group_a"] == "A") & (out["group_b"] == "B")].iloc[0]
+    # Reference values (pooled mid-rank Dunn's with tie correction).
+    assert row["z"] == pytest.approx(-3.409419, abs=1e-4)
+    assert row["p_value"] == pytest.approx(0.000651, abs=1e-5)
+    # Bonferroni over 3 pairs = raw * 3.
+    assert row["p_adj"] == pytest.approx(min(1.0, 0.000651 * 3), abs=1e-5)
+
+    ac = out[(out["group_a"] == "A") & (out["group_b"] == "C")].iloc[0]
+    assert ac["p_adj"] > 0.05  # A vs C not separated
+
+
+def test_dunn_test_correction_is_monotone_and_ge_raw():
+    groups = {"A": [1, 2, 3, 4], "B": [5, 6, 7, 8], "C": [9, 10, 11, 12]}
+    out = dunn_test(groups, correction="holm")
+    # Adjusted p is never smaller than the raw p.
+    assert (out["p_adj"] >= out["p_value"] - 1e-12).all()
+
+
+def test_dunn_test_too_few_groups_returns_empty():
+    assert dunn_test({"A": [1, 2, 3]}).empty
+    assert dunn_test({"A": [1, 2], "B": [np.nan, np.nan]}).empty
+
 
 def test_adjust_pvalues():
     df = pd.DataFrame({

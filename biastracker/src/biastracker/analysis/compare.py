@@ -8,6 +8,7 @@ from biastracker.stats import (
     mannwhitney_u,
     ks_test,
     kruskal_test,
+    dunn_test,
     adjust_pvalues,
     effect_direction,
 )
@@ -455,10 +456,10 @@ def feature_significance(
     → a Kruskal-Wallis omnibus test.
 
     The FDR is only meaningful relative to a family of tests: when *feature* is
-    part of the standard BiasTracker feature panel, the whole panel is tested so
-    the returned ``fdr`` matches the Compare tab exactly. For a feature outside
-    the panel (e.g. ``paxdb_log10_ppm``) only the nominal ``p_value`` is returned
-    and ``fdr`` is ``None``.
+    part of the standard BiasTracker feature panel (``DEFAULT_FEATURES``), the
+    whole panel is tested so the returned ``fdr`` matches the Compare tab exactly.
+    For a feature outside that panel only the nominal ``p_value`` is returned and
+    ``fdr`` is ``None``.
 
     Returns ``None`` (no annotation) when fewer than two datasets carry the
     feature, when dataset names are not distinct, or when their levels differ.
@@ -501,3 +502,111 @@ def feature_significance(
         }
     except ValueError:
         return None
+
+
+_DUNN_COLS = [
+    "feature",
+    "group_a",
+    "group_b",
+    "n_a",
+    "n_b",
+    "median_a",
+    "median_b",
+    "delta_median",
+    "direction",
+    "mean_rank_a",
+    "mean_rank_b",
+    "z",
+    "p_value",
+    "p_adj",
+]
+
+
+def posthoc_dunn_datasets(
+    datasets: List[BiasDataset],
+    features: List[str],
+    correction: str = "holm",
+) -> pd.DataFrame:
+    """Dunn's post-hoc across datasets, per feature, corrected across all pairs.
+
+    For each feature this pools every selected dataset that carries it, runs
+    :func:`~biastracker.stats.dunn_test` (the rank-based post-hoc for a
+    Kruskal-Wallis omnibus), and adjusts the resulting p-values across the whole
+    family of dataset pairs *for that feature* using ``correction``. This is the
+    statistically correct way to ask "which pairs differ?" after the omnibus —
+    unlike running independent Mann-Whitney tests per pair, it corrects for the
+    number of pairs inspected.
+
+    Parameters
+    ----------
+    datasets:
+        Three or more datasets. ``.name`` values must be distinct and ``.level``
+        must match.
+    features:
+        Numeric feature columns to test. Each feature is a separate pairwise
+        family; a feature is skipped unless at least three datasets carry it.
+    correction:
+        Multiple-testing method for the per-feature pair family (e.g. ``"holm"``,
+        ``"bonferroni"``, ``"fdr_bh"``).
+
+    Returns
+    -------
+    pd.DataFrame
+        Long-form table, one row per (feature, dataset pair): see
+        :data:`_DUNN_COLS`. ``p_adj`` is the pair-corrected significance.
+
+    Raises
+    ------
+    ValueError
+        If fewer than three datasets are given, names are not distinct, levels
+        differ, or no feature is present in at least three datasets.
+    """
+    if len(datasets) < 3:
+        raise ValueError("posthoc_dunn_datasets requires at least three datasets.")
+
+    names = [d.name for d in datasets]
+    if len(set(names)) != len(names):
+        raise ValueError(
+            f"dataset names must be distinct so they can be used as group labels; got {names}."
+        )
+    if len({d.level for d in datasets}) > 1:
+        raise ValueError(
+            f"all datasets must share the same level; got {sorted({d.level for d in datasets})}."
+        )
+
+    frames = []
+    for feat in features:
+        groups = {
+            d.name: d.table[feat].to_numpy()
+            for d in datasets
+            if feat in d.table.columns
+        }
+        if len(groups) < 3:
+            continue
+
+        res = dunn_test(groups, correction=correction)
+        if res.empty:
+            continue
+
+        medians = {
+            name: float(np.nanmedian(vals)) if np.isfinite(vals).any() else np.nan
+            for name, vals in groups.items()
+        }
+        res = res.copy()
+        res.insert(0, "feature", feat)
+        res["median_a"] = res["group_a"].map(medians)
+        res["median_b"] = res["group_b"].map(medians)
+        res["delta_median"] = res["median_a"] - res["median_b"]
+        res["direction"] = res.apply(
+            lambda r: effect_direction(r["median_a"], r["median_b"], r["group_a"], r["group_b"]),
+            axis=1,
+        )
+        frames.append(res[_DUNN_COLS])
+
+    if not frames:
+        raise ValueError(
+            "No feature is present in at least three of the selected datasets, "
+            "so no Dunn's post-hoc can be computed."
+        )
+
+    return pd.concat(frames, ignore_index=True).reset_index(drop=True)

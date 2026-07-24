@@ -181,10 +181,11 @@ abundance ranking).
 **PaxDb reference abundance.** PaxDb is treated as **just another per-protein
 metric**: on load, protein-level datasets get a `paxdb_log10_ppm` column
 (`analysis.paxdb.add_paxdb_abundance`) holding the log₁₀ PaxDb ppm matched by
-accession (non-positive / unmatched → NaN, contaminants excluded). It therefore
-appears in the **Distributions** and **Compare** tabs with the usual descriptive
-statistics, exactly like the physicochemical features — there is no separate
-correlation panel.
+accession (non-positive / unmatched → NaN, contaminants excluded). It is a
+member of the default feature panel (`DEFAULT_FEATURES`), so it appears in the
+**Distributions** and **Compare** tabs exactly like the physicochemical
+features — descriptive statistics, and **FDR-corrected as part of the panel**
+family in the between-dataset tests. There is no separate correlation panel.
 
 **Volcano plot.** Enrichment results default to a volcano plot — effect size
 (NES, or ES as a fallback) on the x-axis versus `−log10` of the chosen
@@ -205,5 +206,5 @@ on the plot (toggle: *Sig*). It reuses the same tests as the Compare tab
 **Kruskal-Wallis** for three or more. The annotation shows the test, nominal
 `p`, and — for standard panel features — the panel-corrected `FDR` (matching the
 Compare tab) plus a significance marker (`**` < 0.05, `*` < 0.1, else `n.s.`);
-two-dataset violin plots also get a significance bracket. Features outside the
-standard panel (e.g. `paxdb_log10_ppm`) show the nominal `p` only.
+two-dataset violin plots also get a significance bracket. A feature outside the
+standard panel would show the nominal `p` only.

@@ -7,6 +7,7 @@ from biastracker.analysis.compare import (
     compare_multiple_groups,
     compare_datasets,
     feature_significance,
+    posthoc_dunn_datasets,
 )
 
 
@@ -23,6 +24,49 @@ def _mk(name, length_vals):
         }),
         level="protein",
     )
+
+
+class TestPosthocDunnDatasets:
+    def test_flags_the_separated_pair(self):
+        a = _mk("A", [10, 11, 12, 13, 10, 12, 11])
+        b = _mk("B", [40, 41, 42, 43, 40, 44, 42])   # clearly higher
+        c = _mk("C", [10, 13, 11, 12, 9, 14, 10])    # ~ like A
+        out = posthoc_dunn_datasets([a, b, c], features=["length"], correction="holm")
+
+        assert len(out) == 3  # one row per unordered pair
+        assert set(out["feature"]) == {"length"}
+
+        def pair(x, y):
+            m = out[((out.group_a == x) & (out.group_b == y))
+                    | ((out.group_a == y) & (out.group_b == x))]
+            return m.iloc[0]
+
+        assert pair("A", "B")["p_adj"] < 0.05
+        assert pair("B", "C")["p_adj"] < 0.05
+        assert pair("A", "C")["p_adj"] > 0.05          # A and C not separated
+        # adjusted p never below raw p
+        assert (out["p_adj"] >= out["p_value"] - 1e-12).all()
+
+    def test_requires_three_datasets(self):
+        a = _mk("A", [1, 2, 3, 4])
+        b = _mk("B", [5, 6, 7, 8])
+        with pytest.raises(ValueError, match="at least three"):
+            posthoc_dunn_datasets([a, b], features=["length"])
+
+    def test_distinct_names_required(self):
+        a = _mk("A", [1, 2, 3, 4])
+        b = _mk("A", [5, 6, 7, 8])
+        c = _mk("C", [9, 10, 11, 12])
+        with pytest.raises(ValueError, match="distinct"):
+            posthoc_dunn_datasets([a, b, c], features=["length"])
+
+    def test_feature_in_fewer_than_three_datasets_is_skipped(self):
+        a = _mk("A", [1, 2, 3, 4]); a.table["mw"] = [100.0, 200.0, 300.0, 400.0]
+        b = _mk("B", [5, 6, 7, 8]); b.table["mw"] = [500.0, 600.0, 700.0, 800.0]
+        c = _mk("C", [9, 10, 11, 12])  # no 'mw'
+        out = posthoc_dunn_datasets([a, b, c], features=["length", "mw"], correction="holm")
+        # 'mw' present in only two datasets -> skipped; only 'length' survives.
+        assert set(out["feature"]) == {"length"}
 
 
 def test_feature_significance_two_datasets_reports_p_and_fdr():
@@ -45,10 +89,21 @@ def test_feature_significance_three_datasets_kruskal():
     assert sig["n_groups"] == 3
 
 
-def test_feature_significance_non_panel_feature_has_no_fdr():
+def test_feature_significance_paxdb_is_panel_feature_reports_fdr():
+    # paxdb_log10_ppm is part of the default panel, so it is FDR-influencing.
     a = _mk("A", [1, 2, 3, 4]); a.table["paxdb_log10_ppm"] = [1.0, 2.0, 3.0, 4.0]
     b = _mk("B", [1, 2, 3, 4]); b.table["paxdb_log10_ppm"] = [5.0, 6.0, 7.0, 8.0]
     sig = feature_significance([a, b], "paxdb_log10_ppm")
+    assert sig is not None
+    assert sig["fdr"] is not None                  # in the panel -> FDR reported
+    assert 0.0 <= sig["p_value"] <= 1.0
+
+
+def test_feature_significance_non_panel_feature_has_no_fdr():
+    # A feature outside DEFAULT_FEATURES gets a nominal p only (no FDR family).
+    a = _mk("A", [1, 2, 3, 4]); a.table["custom_metric"] = [1.0, 2.0, 3.0, 4.0]
+    b = _mk("B", [1, 2, 3, 4]); b.table["custom_metric"] = [5.0, 6.0, 7.0, 8.0]
+    sig = feature_significance([a, b], "custom_metric")
     assert sig is not None
     assert sig["fdr"] is None                      # outside the panel -> nominal p only
     assert 0.0 <= sig["p_value"] <= 1.0

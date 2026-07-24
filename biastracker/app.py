@@ -408,6 +408,32 @@ def _card_html(val: str, label: str) -> str:
     )
 
 
+def _download_table(df, stem: str, key: str, *, label: str = "Download",
+                    index: bool = False) -> None:
+    """Offer *df* for download as CSV or TSV via two side-by-side buttons.
+
+    ``stem`` is the file name without extension (spaces are normalised to
+    underscores); ``key`` seeds the two widget keys. Centralises the export UI so
+    every table offers the same CSV/TSV choice.
+    """
+    stem = stem.replace(" ", "_")
+    csv_col, tsv_col = st.columns(2)
+    csv_col.download_button(
+        f"⬇  {label} (.csv)",
+        data=df.to_csv(index=index).encode(),
+        file_name=f"{stem}.csv",
+        mime="text/csv",
+        key=f"{key}_csv",
+    )
+    tsv_col.download_button(
+        f"⬇  {label} (.tsv)",
+        data=df.to_csv(index=index, sep="\t").encode(),
+        file_name=f"{stem}.tsv",
+        mime="text/tab-separated-values",
+        key=f"{key}_tsv",
+    )
+
+
 def _sig_marker(fdr) -> str:
     try:
         v = float(fdr)
@@ -564,12 +590,28 @@ def _hex_to_rgba(hex_color: str, alpha: float) -> str:
     return f"rgba({r},{g},{b},{alpha})"
 
 
-def _dataset_id_set(ds) -> set[str]:
-    """Unique protein identifiers for a dataset, excluding contaminants.
+def _overlap_noun(levels: set[str], plural: bool = True) -> str:
+    """Noun for the identifiers being overlapped, from the dataset level(s).
 
-    Non-quantified proteins are already removed at load (see
+    ``{"protein"}`` → protein(s), ``{"peptide"}`` → peptide(s); a mix of levels
+    falls back to the neutral "identifier(s)".
+    """
+    if levels == {"protein"}:
+        base = "protein"
+    elif levels == {"peptide"}:
+        base = "peptide"
+    else:
+        base = "identifier"
+    return base + "s" if plural else base
+
+
+def _dataset_id_set(ds) -> set[str]:
+    """Unique identifiers for a dataset (proteins or peptides), excluding contaminants.
+
+    Non-quantified rows are already removed at load (see
     :func:`_apply_lfq_filter`), so this is the set of detected, non-contaminant
-    proteins — the meaningful set for cross-dataset overlap.
+    identifiers at the dataset's level — the meaningful set for cross-dataset
+    overlap.
     """
     if ds.id_col not in ds.table.columns:
         return set()
@@ -652,13 +694,15 @@ def _venn_figure(sets: dict[str, set]) -> go.Figure:
 
 
 def _render_overlap_section(datasets: dict) -> None:
-    """Venn (2–3 datasets) or an overlap summary (>3) of proteins per dataset."""
+    """Venn (2–3 datasets) or an overlap summary (>3) of identifiers per dataset."""
     st.markdown('<div class="bt-section">Identification overlap</div>', unsafe_allow_html=True)
+
+    noun = _overlap_noun({ds.level for ds in datasets.values()})
 
     id_sets = {name: _dataset_id_set(ds) for name, ds in datasets.items()}
     id_sets = {n: s for n, s in id_sets.items() if s}
     if len(id_sets) < 2:
-        st.caption("Need at least two datasets with quantified proteins to compare.")
+        st.caption(f"Need at least two datasets with quantified {noun} to compare.")
         return
 
     names = list(id_sets.keys())
@@ -668,7 +712,7 @@ def _render_overlap_section(datasets: dict) -> None:
     if len(names) <= 3:
         st.plotly_chart(_venn_figure(id_sets), use_container_width=True)
         st.caption(
-            f"Counts are unique quantified proteins ({id_col}); contaminants excluded. "
+            f"Counts are unique quantified {noun} ({id_col}); contaminants excluded. "
             f"{len(shared_all):,} shared across all {len(names)}."
         )
     else:
@@ -682,9 +726,9 @@ def _render_overlap_section(datasets: dict) -> None:
             st.plotly_chart(_venn_figure({n: id_sets[n] for n in pick}),
                             use_container_width=True)
         st.caption(
-            f"{len(names)} datasets loaded (quantified proteins, contaminants "
+            f"{len(names)} datasets loaded (quantified {noun}, contaminants "
             f"excluded). Pairwise overlap matrix below (diagonal = dataset size); "
-            f"{len(shared_all):,} proteins shared across all {len(names)}."
+            f"{len(shared_all):,} {noun} shared across all {len(names)}."
         )
         mat = pd.DataFrame(index=names, columns=names, dtype=int)
         for a in names:
@@ -945,8 +989,9 @@ def tab_compare(datasets: dict) -> None:
         "Datasets to compare",
         names,
         default=names,
-        help="Pick 2 for a pairwise test (Mann-Whitney U + KS), "
-             "or 3+ for an omnibus Kruskal-Wallis test across all of them.",
+        help="Pick 2 for a pairwise test (Mann-Whitney U + KS), or 3+ for an "
+             "omnibus Kruskal-Wallis test across all of them plus an optional "
+             "post-hoc 1-vs-1 comparison between any two of them.",
     )
 
     if len(selected) < 2:
@@ -982,27 +1027,45 @@ def tab_compare(datasets: dict) -> None:
     if st.session_state.get("cmp_mode") == "multi":
         _render_multi_compare(datasets)
     else:
-        _render_pairwise_compare(datasets)
+        _render_pairwise_compare(
+            datasets,
+            st.session_state["cmp_res"],
+            st.session_state.get("cmp_a", "A"),
+            st.session_state.get("cmp_b", "B"),
+            st.session_state["cmp_label"],
+            key_prefix="pw",
+        )
 
 
-def _render_pairwise_compare(datasets: dict) -> None:
-    res: pd.DataFrame = st.session_state["cmp_res"]
-    cmp_a: str        = st.session_state.get("cmp_a", "A")
-    cmp_b: str        = st.session_state.get("cmp_b", "B")
-    label: str        = st.session_state["cmp_label"]
+def _render_pairwise_compare(
+    datasets: dict,
+    res: pd.DataFrame,
+    cmp_a: str,
+    cmp_b: str,
+    label: str,
+    *,
+    key_prefix: str = "pw",
+    show_header: bool = True,
+) -> None:
+    """Render one A-vs-B comparison.
 
-    st.markdown(f'<div class="bt-section">Results — {label}</div>', unsafe_allow_html=True)
+    Reused both as the top-level pairwise mode and as a post-hoc pair picked
+    from within a 3+ dataset comparison, so it takes its data and widget
+    ``key_prefix`` as arguments rather than reading global session state.
+    """
+    if show_header:
+        st.markdown(f'<div class="bt-section">Results — {label}</div>', unsafe_allow_html=True)
 
     # ── Chart controls ───────────────────────────────────────────────────────
     cc1, cc2 = st.columns([2, 2])
     scale = cc1.radio(
         "Δ scale", ["Raw", "Standardized (effect size)"],
-        horizontal=True,
+        horizontal=True, key=f"{key_prefix}_scale",
         help="Raw shows Δ median in each feature's own units. Standardized "
              "divides by the pooled SD so features are comparable (like Cohen's d).",
     )
     hide_int = cc2.checkbox(
-        "Hide intensity-type features", value=False,
+        "Hide intensity-type features", value=False, key=f"{key_prefix}_hide_int",
         help="Hide abundance / large-magnitude features (expression, extinction "
              "coefficients) that otherwise dominate the raw axis.",
     )
@@ -1088,11 +1151,9 @@ def _render_pairwise_compare(datasets: dict) -> None:
     )
     st.caption("Sig: ** = FDR < 0.05,  * = FDR < 0.1")
 
-    st.download_button(
-        "⬇  Download comparison CSV",
-        data=res.to_csv(index=False).encode(),
-        file_name=f"comparison_{cmp_a}_vs_{cmp_b}.csv".replace(" ", "_"),
-        mime="text/csv",
+    _download_table(
+        res, f"comparison_{cmp_a}_vs_{cmp_b}",
+        key=f"{key_prefix}_dl", label="Download comparison",
     )
 
 
@@ -1107,16 +1168,17 @@ def _render_multi_compare(datasets: dict) -> None:
         "differ across *any* of the selected datasets?"
     )
 
-    # Features tested = intersection across all datasets. Flag any that were
-    # dropped because at least one selected dataset lacked them.
-    tested = set(res["feature"])
+    # Flag registry features that only some selected datasets carry — those are
+    # the ones genuinely dropped from the cross-dataset test. Features present in
+    # every dataset are all tested.
+    n_sel = len(selected)
     available: dict[str, set] = {}
     for n in selected:
         ds = datasets.get(n)
         if ds is not None:
             for f in _available_features(ds):
                 available.setdefault(f, set()).add(n)
-    dropped = {f: v for f, v in available.items() if f not in tested}
+    dropped = {f: v for f, v in available.items() if len(v) < n_sel}
     if dropped:
         detail = "; ".join(
             f"{_lbl(f)} (only in {', '.join(sorted(present))})"
@@ -1203,11 +1265,211 @@ def _render_multi_compare(datasets: dict) -> None:
     st.dataframe(disp.style.format(fmt_cols), use_container_width=True, hide_index=True)
     st.caption("Sig: ** = FDR < 0.05,  * = FDR < 0.1")
 
-    st.download_button(
-        "⬇  Download comparison CSV",
-        data=res.to_csv(index=False).encode(),
-        file_name=f"comparison_{label.replace(' ', '_')}.csv",
-        mime="text/csv",
+    _download_table(res, f"comparison_{label}", key="multi_dl", label="Download comparison")
+
+    # ── Post-hoc: Dunn's test — which pairs differ, corrected across pairs ────
+    _render_dunn_posthoc(datasets, selected, list(res["feature"]))
+
+
+_DUNN_CORRECTIONS = {
+    "Holm": "holm",
+    "Bonferroni": "bonferroni",
+    "Benjamini-Hochberg (FDR)": "fdr_bh",
+}
+
+
+def _render_dunn_posthoc(datasets: dict, selected: list, features: list) -> None:
+    """Dunn's post-hoc: all dataset pairs per feature, corrected across the pairs.
+
+    This is the statistically correct follow-up to the omnibus Kruskal-Wallis:
+    it re-uses the pooled ranking and corrects each feature's p-values across the
+    whole family of dataset pairs, so inspecting many pairs doesn't inflate false
+    positives.
+    """
+    from biastracker.analysis.compare import posthoc_dunn_datasets
+
+    st.markdown('<div class="bt-section">Pairwise post-hoc — Dunn\'s test</div>', unsafe_allow_html=True)
+    st.caption(
+        "The omnibus test flags features that differ across *some* dataset. "
+        "**Dunn's test** then compares every pair of datasets per feature, with "
+        "the p-values corrected across all pairs so scanning many pairs doesn't "
+        "inflate false positives."
+    )
+
+    method_lbl = st.selectbox(
+        "Multiple-comparison correction (across pairs)",
+        list(_DUNN_CORRECTIONS),
+        index=0, key="dunn_method",
+        help="Holm and Bonferroni control the family-wise error rate (stricter); "
+             "Benjamini-Hochberg controls the false discovery rate (more lenient).",
+    )
+    correction = _DUNN_CORRECTIONS[method_lbl]
+
+    try:
+        dunn = posthoc_dunn_datasets(
+            [datasets[n] for n in selected], features=features, correction=correction,
+        )
+    except ValueError as exc:
+        st.info(str(exc))
+        return
+
+    feats = list(dict.fromkeys(dunn["feature"]))  # tested features, original order
+
+    # ── Per-feature matrix: corrected pairwise significance across datasets ──
+    feat = st.selectbox(
+        "Feature", feats, index=0, key="dunn_feat", format_func=_lbl,
+    )
+    sub = dunn[dunn["feature"] == feat]
+
+    # Symmetric K×K matrix of corrected p-values (diagonal blank).
+    order = [n for n in selected if n in set(sub["group_a"]) | set(sub["group_b"])]
+    pmat = pd.DataFrame(np.nan, index=order, columns=order, dtype=float)
+    for _, r in sub.iterrows():
+        pmat.loc[r["group_a"], r["group_b"]] = r["p_adj"]
+        pmat.loc[r["group_b"], r["group_a"]] = r["p_adj"]
+
+    z = -np.log10(pmat.clip(lower=1e-300))          # colour by −log₁₀ p_adj
+    text = pmat.map(lambda v: "" if pd.isna(v) else f"{v:.2g}{_sig_marker(v)}")
+    hmap = go.Figure(go.Heatmap(
+        z=z.values, x=order, y=order,
+        text=text.values, texttemplate="%{text}",
+        colorscale="Blues", zmin=0, zmax=max(2.0, float(np.nanmax(z.values)) if np.isfinite(z.values).any() else 2.0),
+        colorbar=dict(title="−log₁₀ p"),
+        hovertemplate="%{y} vs %{x}<br>adj p = %{customdata:.3g}<extra></extra>",
+        customdata=pmat.values,
+    ))
+    hmap.update_layout(
+        template="plotly_white",
+        height=max(280, len(order) * 60 + 120),
+        margin=dict(l=120, r=20, t=30, b=60),
+        font=dict(color=_NAVY, size=12),
+        yaxis=dict(autorange="reversed"),
+        title=f"{_lbl(feat)} — Dunn's adjusted p ({method_lbl})",
+    )
+    st.plotly_chart(hmap, use_container_width=True)
+    st.caption("Darker = more significant.  ** = adj p < 0.05,  * = adj p < 0.1.")
+
+    # ── Pair drill-down: every feature for one chosen pair ───────────────────
+    pc1, pc2 = st.columns(2)
+    pa = pc1.selectbox("Dataset A", selected, index=0, key="dunn_a")
+    pb = pc2.selectbox(
+        "Dataset B", selected, index=1 if len(selected) > 1 else 0, key="dunn_b"
+    )
+    if pa == pb:
+        st.info("Pick two **different** datasets to drill into a pair.")
+        return
+
+    # Dunn rows for this pair (either ordering), across all features.
+    pair = dunn[
+        ((dunn["group_a"] == pa) & (dunn["group_b"] == pb))
+        | ((dunn["group_a"] == pb) & (dunn["group_b"] == pa))
+    ].copy()
+    if pair.empty:
+        st.info(f"No comparable feature carried by both **{pa}** and **{pb}**.")
+        return
+
+    # Orient every row as A (=pa) − B (=pb). The Dunn p-values are pair-symmetric,
+    # so we only need to re-derive the direction-carrying columns from the chosen
+    # perspective — recomputing straight from the datasets rather than swapping
+    # columns in place (which is error-prone).
+    def _median(name: str, feat: str) -> float:
+        t = datasets[name].table
+        return float(np.nanmedian(t[feat].to_numpy())) if feat in t.columns else np.nan
+
+    def _n_valid(name: str, feat: str) -> int:
+        t = datasets[name].table
+        return int(t[feat].notna().sum()) if feat in t.columns else 0
+
+    z_sign = np.where(pair["group_a"].to_numpy() == pa, 1.0, -1.0)
+    pair["z"] = pair["z"].to_numpy() * z_sign
+    pair["median_a"] = [_median(pa, f) for f in pair["feature"]]
+    pair["median_b"] = [_median(pb, f) for f in pair["feature"]]
+    pair["n_a"] = [_n_valid(pa, f) for f in pair["feature"]]
+    pair["n_b"] = [_n_valid(pb, f) for f in pair["feature"]]
+    pair["group_a"], pair["group_b"] = pa, pb
+    pair["delta_median"] = pair["median_a"] - pair["median_b"]
+    pair["direction"] = np.select(
+        [pair["delta_median"] > 0, pair["delta_median"] < 0],
+        ["higher_in_" + pa, "higher_in_" + pb],
+        default="no_difference",
+    )
+
+    st.markdown(f'<div class="bt-section">{pa} vs {pb} — all features</div>', unsafe_allow_html=True)
+
+    ctrl1, ctrl2 = st.columns([2, 2])
+    scale = ctrl1.radio(
+        "Δ scale", ["Raw", "Standardized (effect size)"], horizontal=True,
+        key="dunn_scale",
+        help="Raw shows Δ median in each feature's own units. Standardized "
+             "divides by the pooled SD so features are comparable (like Cohen's d).",
+    )
+    hide_int = ctrl2.checkbox(
+        "Hide intensity-type features", value=False, key="dunn_hide_int",
+        help="Hide abundance / large-magnitude features that dominate the raw axis.",
+    )
+    standardized = scale.startswith("Standardized")
+
+    pdf = pair[~pair["feature"].isin(_INTENSITY_FEATS)] if hide_int else pair.copy()
+    if standardized:
+        ds_a, ds_b = datasets.get(pa), datasets.get(pb)
+        pdf["plot_val"] = pdf.apply(lambda r: _standardized_delta(r, ds_a, ds_b), axis=1)
+        pdf = pdf.dropna(subset=["plot_val"])
+        x_title = f"Standardized Δ  ({pa} − {pb}),  pooled-SD units"
+    else:
+        pdf["plot_val"] = pdf["delta_median"]
+        x_title = f"Δ Median  ({pa} − {pb})"
+
+    pdf["feature_label"] = pdf["feature"].map(_lbl)
+    pdf["sig"] = pdf["p_adj"].apply(
+        lambda x: "adj p < 0.05" if x < 0.05 else ("adj p < 0.1" if x < 0.1 else "n.s.")
+    )
+    pdf = pdf.sort_values("plot_val")
+
+    sig_palette = {"adj p < 0.05": "#d32f2f", "adj p < 0.1": "#f57c00", "n.s.": "#BBBBBB"}
+    wfig = go.Figure()
+    for sig_level, color in sig_palette.items():
+        sig_sub = pdf[pdf["sig"] == sig_level]
+        if sig_sub.empty:
+            continue
+        wfig.add_trace(go.Bar(
+            x=sig_sub["plot_val"], y=sig_sub["feature_label"],
+            orientation="h", name=sig_level, marker_color=color, opacity=0.85,
+        ))
+    wfig.add_vline(x=0, line_dash="dash", line_color=_NAVY, line_width=1.2)
+    wfig.update_layout(
+        template="plotly_white", xaxis_title=x_title, barmode="overlay",
+        height=max(300, len(pdf) * 40 + 100), legend_title="Significance",
+        margin=dict(l=160, r=20, t=30, b=50), font=dict(color=_NAVY, size=12),
+    )
+    st.plotly_chart(wfig, use_container_width=True)
+
+    disp = pair[["feature", "n_a", "n_b", "median_a", "median_b",
+                 "delta_median", "direction", "z", "p_value", "p_adj"]].copy()
+    disp["feature"] = disp["feature"].map(_lbl)
+    disp["sig"] = disp["p_adj"].apply(_sig_marker)
+    disp = disp.rename(columns={
+        "feature":      "Feature",
+        "n_a":          f"N ({pa})",
+        "n_b":          f"N ({pb})",
+        "median_a":     f"Median ({pa})",
+        "median_b":     f"Median ({pb})",
+        "delta_median": "Δ Median",
+        "direction":    "Direction",
+        "z":            "Dunn z",
+        "p_value":      "p (raw)",
+        "p_adj":        "adj p",
+        "sig":          "Sig",
+    })
+    fmt_cols = {c: "{:.4g}" for c in disp.columns
+                if any(k in c for k in ["Median", "Δ", "z", "p"])}
+    st.dataframe(disp.style.format(fmt_cols), use_container_width=True, hide_index=True)
+    st.caption(
+        f"**adj p** = Dunn's p corrected across all dataset pairs for each feature "
+        f"({method_lbl}).  Sig: ** = adj p < 0.05,  * = adj p < 0.1."
+    )
+    _download_table(
+        dunn, f"dunn_posthoc_{'_'.join(selected)}",
+        key="dunn_dl", label="Download Dunn's post-hoc",
     )
 
 
@@ -1450,12 +1712,7 @@ def _run_ora_ui(datasets: dict, annotations) -> None:
         disp.style.format({c: "{:.4g}" for c in ("Odds ratio", "p", "FDR")}),
         use_container_width=True, hide_index=True,
     )
-    st.download_button(
-        "⬇  Download ORA results CSV",
-        data=res.to_csv(index=False).encode(),
-        file_name=f"ora_{label.replace(' ', '_')}.csv",
-        mime="text/csv", key="ora_dl",
-    )
+    _download_table(res, f"ora_{label}", key="ora_dl", label="Download ORA results")
 
 
 def _run_fgsea_ui(datasets: dict, annotations) -> None:
@@ -1599,12 +1856,7 @@ def _run_fgsea_ui(datasets: dict, annotations) -> None:
         disp.style.format({c: "{:.4g}" for c in ("ES", "NES", "p", "FDR")}),
         use_container_width=True, hide_index=True,
     )
-    st.download_button(
-        "⬇  Download fgsea results CSV",
-        data=res.to_csv(index=False).encode(),
-        file_name=f"fgsea_{label.replace(' ', '_')}.csv",
-        mime="text/csv", key="gsea_dl",
-    )
+    _download_table(res, f"fgsea_{label}", key="gsea_dl", label="Download fgsea results")
 
 
 def _dataset_union_ids(datasets: dict) -> set[str]:
@@ -1820,12 +2072,9 @@ def tab_export(datasets: dict) -> None:
 
     st.markdown('<div class="bt-section">Download Processed Tables</div>', unsafe_allow_html=True)
     for name, ds in datasets.items():
-        st.download_button(
-            label=f"⬇  {name} — annotated table (.csv)",
-            data=ds.table.to_csv(index=False).encode(),
-            file_name=f"{name.replace(' ', '_')}_annotated.csv",
-            mime="text/csv",
-            key=f"dl_{name}",
+        _download_table(
+            ds.table, f"{name}_annotated",
+            key=f"dl_{name}", label=f"{name} — annotated table",
         )
 
     if "cmp_res" in st.session_state:
@@ -1834,12 +2083,9 @@ def tab_export(datasets: dict) -> None:
             unsafe_allow_html=True,
         )
         lbl = st.session_state.get("cmp_label", "comparison")
-        st.download_button(
-            label=f"⬇  {lbl} — statistics (.csv)",
-            data=st.session_state["cmp_res"].to_csv(index=False).encode(),
-            file_name=f"stats_{lbl.replace(' ', '_')}.csv",
-            mime="text/csv",
-            key="dl_cmp",
+        _download_table(
+            st.session_state["cmp_res"], f"stats_{lbl}",
+            key="dl_cmp", label=f"{lbl} — statistics",
         )
 
 

@@ -4,7 +4,7 @@ from typing import Set, Dict, List, Optional
 DEFAULT_FEATURES = [
     "length", "mw", "pi", "gravy", "instability", "aromaticity", "aliphatic_index",
     "ext_reduced", "ext_cystine", "charge_at_pH", "trypsin_sites",
-    "missed_cleavages", "expression"
+    "missed_cleavages", "expression", "paxdb_log10_ppm"
 ]
 
 def select_numeric_features(df: pd.DataFrame, features: Optional[List[str]] = None, exclude: Optional[List[str]] = None) -> List[str]:
